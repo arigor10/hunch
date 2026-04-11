@@ -1,6 +1,6 @@
 # Hunch
 
-Catches the moments in your agentic research that don't quite add up — before you build on them.
+Catches the moments in your agentic research that don't quite add up — before your agent builds on them.
 
 Hunch is an early-stage open source project exploring runtime critique for agentic research workflows — a "meeting-room colleague" that watches a research session unfold and surfaces hunches about things worth a second look.
 
