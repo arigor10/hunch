@@ -1,6 +1,6 @@
 # Hunch
 
-A research colleague that has hunches about your work.
+Catches the moments in your agentic research that don't quite add up — before you build on them.
 
 Hunch is an early-stage open source project exploring runtime critique for agentic research workflows — a "meeting-room colleague" that watches a research session unfold and surfaces hunches about things worth a second look.
 
