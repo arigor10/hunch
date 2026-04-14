@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from hunch.critic import Hunch, hunch_emit_record
+from hunch.journal.append import append_json_line
 
 
 _HUNCH_ID_RE = re.compile(r"^h-(\d+)$")
@@ -159,8 +160,7 @@ class HunchesWriter:
         return max_n
 
     def _append(self, entry: dict[str, Any]) -> None:
-        with open(self.hunches_path, "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_json_line(self.hunches_path, entry)
 
 
 # ---------------------------------------------------------------------------

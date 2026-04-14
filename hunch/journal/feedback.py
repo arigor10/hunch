@@ -17,10 +17,11 @@ Appendix A for the schema this module implements.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from hunch.journal.append import append_json_line
 
 
 @dataclass
@@ -72,5 +73,4 @@ class FeedbackWriter:
         )
 
     def _append(self, entry: dict[str, Any]) -> None:
-        with open(self.feedback_path, "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_json_line(self.feedback_path, entry)

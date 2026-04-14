@@ -14,12 +14,12 @@ Invariants (per framework_v0.md §Design invariants):
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hunch.journal.append import append_json_line
 from hunch.parse import Event, ParserState, poll_new_events
 
 
@@ -260,12 +260,10 @@ class ReplayBufferWriter:
     # -----------------------------------------------------------------
 
     def _append_conversation(self, entry: dict[str, Any]) -> None:
-        with open(self.conversation_path, "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_json_line(self.conversation_path, entry)
 
     def _append_artifact_event(self, entry: dict[str, Any]) -> None:
-        with open(self.artifacts_log_path, "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_json_line(self.artifacts_log_path, entry)
 
 
 # ---------------------------------------------------------------------------
