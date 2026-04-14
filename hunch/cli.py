@@ -67,7 +67,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "sonnet calls Anthropic API, requires ANTHROPIC_API_KEY)",
     )
 
-    sub.add_parser("init", help="(planned) scaffold .hunch/ config")
+    ini = sub.add_parser(
+        "init",
+        help="create .hunch/replay/ and merge the UserPromptSubmit hook into "
+        ".claude/settings.local.json",
+    )
+    ini.add_argument(
+        "--cwd",
+        type=Path,
+        default=None,
+        help="project directory to initialize (default: current working directory)",
+    )
+
     sub.add_parser("status", help="(planned) print replay-buffer / hunch counts")
 
     ls = sub.add_parser("list", help="print current hunches with statuses")
@@ -182,12 +193,35 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_label(ns)
     if ns.command == "panel":
         return _cmd_panel(ns)
-    if ns.command in ("init", "status"):
+    if ns.command == "init":
+        return _cmd_init(ns)
+    if ns.command == "status":
         sys.stderr.write(
-            f"hunch {ns.command}: not yet implemented (v0 skeleton).\n"
+            "hunch status: not yet implemented (v0 skeleton).\n"
         )
         return 2
     parser.print_help()
+    return 0
+
+
+def _cmd_init(ns: argparse.Namespace) -> int:
+    from hunch.init import init_project
+
+    cwd = (ns.cwd or Path.cwd()).resolve()
+    if not cwd.is_dir():
+        sys.stderr.write(f"hunch init: {cwd} is not a directory\n")
+        return 1
+    try:
+        result = init_project(cwd)
+    except RuntimeError as e:
+        sys.stderr.write(f"hunch init: {e}\n")
+        return 1
+
+    replay_dir = cwd / ".hunch" / "replay"
+    settings_path = cwd / ".claude" / "settings.local.json"
+    sys.stdout.write(f"hunch init: {cwd}\n")
+    for line in result.as_lines(replay_dir, settings_path):
+        sys.stdout.write(line + "\n")
     return 0
 
 
