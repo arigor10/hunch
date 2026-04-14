@@ -62,7 +62,7 @@ Richer team configurations can come later. For now, we keep the team minimal so 
 
 Hunch operates on the **research process itself** — the conversation between the Scientist and the Researcher, the intermediate results, the moment-by-moment reasoning — not on finished products like papers or writeups. Existing AI research reviewers often operate on polished outputs, where the messy intermediate state has already been cleaned away. By that point, the moment where someone might have said "this looks off" has either been caught or quietly explained away. Only the process exposes it.
 
-The earliest detectable moment is *during the work*. A Critic that flags an issue while the experiment is running can save hours of wasted compute — provided the flag is worth the interruption. False positives have their own cost: every unwarranted interruption taxes the Scientist's attention, and a Critic that cries wolf quickly trains the Scientist to tune it out. Keeping precision high enough to earn its interruptions is a first-order design concern, not a tuning afterthought. A reviewer who flags it after the paper is written is too late to prevent the waste — and may be too late to change the methodology. The cost of a missed hunch compounds: by the time a wrong turn becomes a published result or an irreversible decision, undoing it is expensive. The earlier you catch it, the cheaper.
+The earliest detectable moment is *during the work*. A Critic that flags an issue while the experiment is running can save hours of wasted compute — provided the flag is worth the interruption. False positives have their own cost: every unwarranted interruption taxes the Scientist's attention, and — if the Researcher investigates seriously — consumes its compute and context too. A Critic that cries wolf quickly trains the Scientist to tune it out. Keeping precision high enough to earn its interruptions is a first-order design concern, not a tuning afterthought. A reviewer who flags it after the paper is written is too late to prevent the waste — and may be too late to change the methodology. The cost of a missed hunch compounds: by the time a wrong turn becomes a published result or an irreversible decision, undoing it is expensive. The earlier you catch it, the cheaper.
 
 We call the framing **a meeting-room colleague**. Imagine a thoughtful peer sitting in on a long research session, listening without interrupting, occasionally raising a hand to say *"hold on, can we pause on this for a second?"* That is the role Hunch is trying to fill. Not a gatekeeper. Not a code reviewer. Not a copilot. A colleague whose job is to catch the moments that don't quite add up — quietly, in real time.
 
@@ -91,14 +91,14 @@ Why the split? Two reasons. One is strategic: noticing is the part LLMs lack nat
 
 The argument that *"once the hunch is raised, the Researcher can take it from there"* has a failure mode: the Researcher may hand-wave a real concern away with a plausible-sounding explanation. A confident dismissal launders the anomaly — the Scientist reads the reply, finds the reasoning reasonable, and moves on. If this happens often, the Critic's value gets quietly absorbed into reassurances.
 
-We mitigate along several paths, each doing different work:
+We have several angles on this, none of which is a full solution:
 
-- **Dismissals are first-class events** in the replay buffer, logged with the Researcher's rationale. No dismissal is invisible.
-- **The side panel surfaces dismissed hunches** at the end of autonomous stretches, so the Scientist reviews them even if they never paused during the session.
-- **An offline, cross-model verifier re-judges dismissals.** Nothing in Hunch's design assumes any specific model for the Critic, the Researcher, or the verifier — and when they come from different model families, their biases correlate less, making the verifier meaningfully independent. Its labels become weak precision data that feeds the evaluation loop.
-- **Scientist feedback remains the ground truth.** The verifier itself needs calibration against human labels, and periodic spot-checks catch drift. The pipeline *amortizes* the labeling effort rather than replacing it; part of that amortization is mentorship itself — much labeling happens not as discrete annotation but as conversation.
+- **Dismissals are first-class events** in the replay buffer, logged with the Researcher's rationale. No dismissal is invisible, which at minimum makes audit possible.
+- **The side panel surfaces dismissed hunches** for the Scientist to review. This helps only to the extent the Scientist actually reviews — a real ceiling, not a solved problem.
+- **An offline, disinterested verifier re-judges dismissals.** It sits outside the research loop — neither invested in progress nor committed to a prior call — so the pull toward "this is fine, let's keep moving" doesn't apply. Nothing in Hunch's design assumes any specific model for the Critic, the Researcher, or the verifier; when they come from different model families, their biases correlate less, and the verifier becomes meaningfully independent on two axes rather than one.
+- **Scientist feedback is ground truth, not a full oracle.** The verifier is calibrated against human labels, and spot-checks catch drift; but that calibration inherits whatever noise the Scientist's in-the-moment labels carry. The pipeline *amortizes* the labeling effort — much of it happens as mentorship-by-conversation rather than discrete annotation — but amortization is not elimination.
 
-None of these alone is sufficient. Together, they keep dismissals from becoming the quiet failure mode that kills the Critic's signal over time.
+Whether these angles together put the Critic's effective precision close enough to useful is something we expect to learn by running it, not assert here. Dismissal-laundering is a ceiling we push against, not one we've solved.
 
 ## Learning by mentorship
 
