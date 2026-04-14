@@ -59,6 +59,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="loop wake-up interval in seconds (default: 1)",
     )
+    run.add_argument(
+        "--critic",
+        choices=("stub", "sonnet"),
+        default="stub",
+        help="critic implementation (default: stub — emits nothing; "
+        "sonnet calls Anthropic API, requires ANTHROPIC_API_KEY)",
+    )
 
     sub.add_parser("init", help="(planned) scaffold .hunch/ config")
     sub.add_parser("status", help="(planned) print replay-buffer / hunch counts")
@@ -132,6 +139,12 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     from hunch.run import RunConfig, Runner
 
     cwd = Path.cwd()
+
+    def _log(msg: str) -> None:
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+
+    critic_factory = _resolve_critic_factory(ns.critic, _log)
     config = RunConfig(
         cwd=cwd,
         transcript_path=ns.transcript,
@@ -139,10 +152,8 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         project_roots=list(ns.project_roots or []),
         interval_s=ns.interval,
         poll_s=ns.poll,
+        critic_factory=critic_factory,
     )
-    def _log(msg: str) -> None:
-        sys.stdout.write(msg + "\n")
-        sys.stdout.flush()
 
     try:
         runner = Runner(config=config, log=_log)
@@ -178,6 +189,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     parser.print_help()
     return 0
+
+
+def _resolve_critic_factory(name: str, log):
+    """Map a --critic name to a zero-arg factory that builds a Critic."""
+    if name == "stub":
+        from hunch.critic.stub import StubCritic
+        return StubCritic
+    if name == "sonnet":
+        from hunch.critic.stateless_sonnet import SonnetCritic
+        return lambda: SonnetCritic(log=log)
+    raise ValueError(f"unknown --critic value: {name!r}")
 
 
 def _resolved_replay_dir(explicit: Path | None) -> Path:

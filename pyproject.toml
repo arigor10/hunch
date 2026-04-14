@@ -28,6 +28,9 @@ where = ["."]
 include = ["hunch*"]
 exclude = ["tests*"]
 
+[tool.setuptools.package-data]
+"hunch.critic" = ["prompts/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
