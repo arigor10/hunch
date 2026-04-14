@@ -33,6 +33,8 @@ Hunch is our attempt to build an agent that learns this missing skill — the Cr
 
 These are two faces of the same principle: the **generation–discrimination gap**. Discrimination is systematically more tractable than generation, and the gap works in our favor twice. First, in the choice of *what* to build: critiquing research is more learnable than generating it. Second, within the Critic's own task: the hard part is noticing, the easy part is checking. False alarms can be filtered by the agent's own judgment; real misses — hunches the Critic should have raised but didn't — are caught by the human, and that is where the learning loop begins.
 
+The second claim — that within a raised hunch, an LLM can reliably discriminate signal from noise — is itself a hypothesis we treat as load-bearing. The generation–discrimination gap gives it tailwind, but it is not a guarantee. We test it empirically: the Critic's precision is measured on its own emitted hunches and iterated against.
+
 This is the gap Hunch is built around. Not capability, but attention and methodology — and, eventually, a path for the Critic to learn the missing piece through mentorship, over time.
 
 
@@ -60,7 +62,7 @@ Richer team configurations can come later. For now, we keep the team minimal so 
 
 Hunch operates on the **research process itself** — the conversation between the Scientist and the Researcher, the intermediate results, the moment-by-moment reasoning — not on finished products like papers or writeups. Existing AI research reviewers often operate on polished outputs, where the messy intermediate state has already been cleaned away. By that point, the moment where someone might have said "this looks off" has either been caught or quietly explained away. Only the process exposes it.
 
-The earliest detectable moment is *during the work*. A Critic that flags an issue while the experiment is running can save hours of wasted compute. A reviewer who flags it after the paper is written is too late to prevent the waste — and may be too late to change the methodology. The cost of a missed hunch compounds: by the time a wrong turn becomes a published result or an irreversible decision, undoing it is expensive. The earlier you catch it, the cheaper.
+The earliest detectable moment is *during the work*. A Critic that flags an issue while the experiment is running can save hours of wasted compute — provided the flag is worth the interruption. False positives have their own cost: every unwarranted interruption taxes the Scientist's attention, and a Critic that cries wolf quickly trains the Scientist to tune it out. Keeping precision high enough to earn its interruptions is a first-order design concern, not a tuning afterthought. A reviewer who flags it after the paper is written is too late to prevent the waste — and may be too late to change the methodology. The cost of a missed hunch compounds: by the time a wrong turn becomes a published result or an irreversible decision, undoing it is expensive. The earlier you catch it, the cheaper.
 
 We call the framing **a meeting-room colleague**. Imagine a thoughtful peer sitting in on a long research session, listening without interrupting, occasionally raising a hand to say *"hold on, can we pause on this for a second?"* That is the role Hunch is trying to fill. Not a gatekeeper. Not a code reviewer. Not a copilot. A colleague whose job is to catch the moments that don't quite add up — quietly, in real time.
 
@@ -74,12 +76,29 @@ Long horizon is exactly where attention is hardest to hold. To stretch the horiz
 
 A Critic in the meeting-room sense has two possible jobs:
 
-1. **Smell** — notice that something doesn't add up.
-2. **Diagnose** — explain what's wrong and what to do about it.
+1. **Smell** — notice that something doesn't add up, and articulate *what* is inconsistent with what, citing specific prior evidence.
+2. **Diagnose** — explain *why* it's inconsistent, identify the cause, and propose what to do about it.
 
-Hunch commits to the first only. The Critic flags the moment (*"this number looks inconsistent with what was claimed earlier"*) and stops there. Often the Researcher diagnoses on its own once the hunch is on the table; the Scientist joins when needed. Either way, diagnosis is downstream of the flag — and a different skill entirely.
+Hunch commits to the first only. "Smelling" in this sense is not a bare one-line ping: it includes articulating the anomaly and citing the specific prior result, claim, or experiment it strains against. What it deliberately stops short of is cause and remedy.
+
+The distinction matters because establishing that an issue *exists* is epistemically prior to explaining *why* it exists. One can perfectly point to a problem that will take tremendous effort — and tremendous skill — to diagnose; even if no diagnosis is ever found, the existence of the issue stands on its own cited evidence. The Critic's job is to establish existence. Cause is downstream.
+
+Once a hunch is on the table, the Researcher often diagnoses on its own; the Scientist joins when needed. Either way, diagnosis is downstream of the flag — and a different skill entirely.
 
 Why the split? Two reasons. One is strategic: noticing is the part LLMs lack natively — once a hunch is raised, the Researcher can usually take it from there. Hunch targets the missing piece, not what's already working. The other is practical: there are many possible diagnoses for any given anomaly, so grading a Critic against any one is either too strict or too loose, while smell is binary enough to grade. We expect some cases will be genuinely debatable; the bet is that enough are unambiguous that catching them would already bring real value.
+
+## When a hunch is dismissed
+
+The argument that *"once the hunch is raised, the Researcher can take it from there"* has a failure mode: the Researcher may hand-wave a real concern away with a plausible-sounding explanation. A confident dismissal launders the anomaly — the Scientist reads the reply, finds the reasoning reasonable, and moves on. If this happens often, the Critic's value gets quietly absorbed into reassurances.
+
+We mitigate along several paths, each doing different work:
+
+- **Dismissals are first-class events** in the replay buffer, logged with the Researcher's rationale. No dismissal is invisible.
+- **The side panel surfaces dismissed hunches** at the end of autonomous stretches, so the Scientist reviews them even if they never paused during the session.
+- **An offline, cross-model verifier re-judges dismissals.** Nothing in Hunch's design assumes any specific model for the Critic, the Researcher, or the verifier — and when they come from different model families, their biases correlate less, making the verifier meaningfully independent. Its labels become weak precision data that feeds the evaluation loop.
+- **Scientist feedback remains the ground truth.** The verifier itself needs calibration against human labels, and periodic spot-checks catch drift. The pipeline *amortizes* the labeling effort rather than replacing it; part of that amortization is mentorship itself — much labeling happens not as discrete annotation but as conversation.
+
+None of these alone is sufficient. Together, they keep dismissals from becoming the quiet failure mode that kills the Critic's signal over time.
 
 ## Learning by mentorship
 
@@ -102,7 +121,7 @@ If many scientists each train their own Critic on their own taste, can the princ
 
 Hunch is being designed so that learned principles are **self-contained, transferable, and composable**. A computational biologist's Critic learns *"if two measurements on the same sample disagree by 3×, flag it"* — and that principle can be dropped into an ML scientist's Critic without architectural conflict. Principles from different Critics can be pooled, contested, and refined by a community over time.
 
-This is not yet a feature; it is a *constraint on architectural decisions*. We avoid choices that entangle learned knowledge into representations that cannot be merged.
+This is not yet a feature; it is a property we will have to earn. The way we plan to earn it is through continuous evaluation on a shared battery of held-out scenarios that tests portability directly: a Critic whose principles are genuinely mergeable should still perform when its knowledge is lifted into a different scientist's setup, while one whose knowledge has silently entangled with its host will show regressions we can see. Text-based principles are our current-best bet for merge-friendly representation because they are the most transparently inspectable and composable, but the evaluation — not the representation choice — is the real guarantor. We try not to close doors on richer, more additive update mechanisms that could survive the same test; we do close the door on ones that cannot.
 
 ## What Hunch is *not*
 
