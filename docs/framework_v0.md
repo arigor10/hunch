@@ -331,6 +331,35 @@ Depends on the Critic v0 being *implementable* (not polished) before step 11 —
 
 ---
 
+## Open framework questions (post-review)
+
+Surfaced during the 2026-04-14 adversarial review and downstream design conversation. Listed here rather than silently letting them rot in review notes.
+
+**Q1: Autonomous-interject path.** The `UserPromptSubmit` hook fires only when the Scientist types. If the Researcher enters a long autonomous stretch (common pattern: debug → run → analyze → fix → rerun), hunches raised during that stretch queue and become post-mortem. The meeting-room framing assumes the Critic can interrupt at a natural pause; with no Scientist present, there is no natural pause.
+
+Possible paths (none decided):
+
+- `PreToolUse` hook — offers mid-stretch injection but risks breaking active workflow.
+- `Stop` hook with `decision: block` — the Researcher can't end its turn while hunches are unread. Forces surfacing but frustrates if the Scientist is genuinely away.
+- Confidence-threshold gating — high-bar hunches interject, low-bar ones queue. Requires the calibrated confidence we explicitly deferred in `critic_v0.md`.
+- SDK wrapping for true mid-turn injection — heavy, but the only path to real-time interjection.
+
+Strategic stance: v0 accepts post-mortem for the Scientist-away case (since the Scientist's next prompt is itself a natural pause). This is the top v0.5 candidate. The transition from "Scientist-gated" to "autonomous interject" is almost certainly per-hunch (a confidence threshold), not a global mode flip.
+
+**Q2: Hunch queue UX.** Corollary of Q1. If hunches pile up during a Scientist-away stretch, the side panel has to support triage on return rather than overwhelm. A wall of 15 hunches is worse than zero — the Scientist bounces.
+
+v0 minimum viable: chronological list with one-line smells; Scientist skims and acts per hunch. Out of scope for v0, likely needed by early v0.5:
+
+- Staleness flag — "is this hunch still live?" check against current replay state.
+- Self-resolution detection — Critic notices on a later tick that a concern was addressed, marks the original suppressed without Scientist involvement.
+- Topic grouping — multiple hunches about the same artifact collapsed in the UI.
+
+**Q3: JSONL concurrency safety.** Invariant #4 says replay-buffer JSONLs are append-only and readers handle concurrent writes "gracefully." POSIX only guarantees atomic appends up to `PIPE_BUF` (typically 4KB on Linux). A Critic `emit` event with a large description + `triggering_refs` written concurrently with a status-change event from the hook can exceed that and interleave, producing a corrupt line that breaks all consumers.
+
+Fix: every replay-buffer writer acquires `fcntl.flock(LOCK_EX)` on the target file before appending, releases after. The logical invariant (append-only) is unchanged; the lock is a low-level implementation detail that keeps the "graceful concurrent access" promise actually true. Centralized as a single `append_json_line(path, entry)` helper used by all four JSONL writers (`hunches.py`, `feedback.py`, and the two `_append_*` methods in `capture/writer.py`) so the invariant is enforced in one place.
+
+---
+
 ## Appendix A: Replay buffer schemas
 
 `.hunch/replay/conversation.jsonl` — one entry per parsed chunk:
