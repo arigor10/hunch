@@ -63,6 +63,36 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="(planned) scaffold .hunch/ config")
     sub.add_parser("status", help="(planned) print replay-buffer / hunch counts")
 
+    ls = sub.add_parser("list", help="print current hunches with statuses")
+    ls.add_argument(
+        "--replay-dir",
+        type=Path,
+        default=None,
+        help="replay-buffer directory (default: .hunch/replay/ under cwd)",
+    )
+    ls.add_argument(
+        "--all",
+        action="store_true",
+        help="include hunches already labeled / dismissed (default: hide)",
+    )
+
+    lbl = sub.add_parser(
+        "label",
+        help="record an explicit Scientist label for a hunch",
+    )
+    lbl.add_argument("hunch_id", help="id like h-0007")
+    lbl.add_argument(
+        "label",
+        choices=("good", "bad", "skip"),
+        help="good | bad | skip",
+    )
+    lbl.add_argument(
+        "--replay-dir",
+        type=Path,
+        default=None,
+        help="replay-buffer directory (default: .hunch/replay/ under cwd)",
+    )
+
     hook = sub.add_parser("hook", help="Claude Code hook handlers (internal)")
     hook_sub = hook.add_subparsers(dest="hook_name", metavar="<hook>")
     ups = hook_sub.add_parser(
@@ -93,19 +123,20 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         interval_s=ns.interval,
         poll_s=ns.poll,
     )
+    def _log(msg: str) -> None:
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+
     try:
-        runner = Runner(config=config)
+        runner = Runner(config=config, log=_log)
     except RuntimeError as e:
         sys.stderr.write(f"hunch run: {e}\n")
         return 1
-    sys.stdout.write(
-        f"hunch run: following {runner.transcript_path}\n"
-        f"           replay={config.resolved_replay_dir()}\n"
-        f"           critic={type(runner.critic).__name__}\n"
-        f"           interval={config.interval_s}s poll={config.poll_s}s\n"
-        f"Ctrl-C to stop.\n"
-    )
-    sys.stdout.flush()
+    _log(f"hunch run: following {runner.transcript_path}")
+    _log(f"           replay={config.resolved_replay_dir()}")
+    _log(f"           critic={type(runner.critic).__name__}")
+    _log(f"           interval={config.interval_s}s poll={config.poll_s}s")
+    _log("Ctrl-C to stop.")
     runner.run_forever()
     return 0
 
@@ -117,12 +148,88 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_run(ns)
     if ns.command == "hook":
         return _cmd_hook(ns)
+    if ns.command == "list":
+        return _cmd_list(ns)
+    if ns.command == "label":
+        return _cmd_label(ns)
     if ns.command in ("init", "status"):
         sys.stderr.write(
             f"hunch {ns.command}: not yet implemented (v0 skeleton).\n"
         )
         return 2
     parser.print_help()
+    return 0
+
+
+def _resolved_replay_dir(explicit: Path | None) -> Path:
+    return explicit or (Path.cwd() / ".hunch" / "replay")
+
+
+def _cmd_list(ns: argparse.Namespace) -> int:
+    from hunch.journal.hunches import read_current_hunches
+    from hunch.journal.feedback import read_labeled_hunch_ids
+
+    replay_dir = _resolved_replay_dir(ns.replay_dir)
+    hunches_path = replay_dir / "hunches.jsonl"
+    if not hunches_path.exists():
+        sys.stdout.write(
+            f"(no hunches yet — {hunches_path} does not exist)\n"
+        )
+        return 0
+
+    records = read_current_hunches(hunches_path)
+    if not records:
+        sys.stdout.write("(no hunches emitted yet)\n")
+        return 0
+
+    labeled = read_labeled_hunch_ids(replay_dir / "feedback.jsonl")
+    visible = records if ns.all else [r for r in records if r.hunch_id not in labeled]
+
+    if not visible:
+        sys.stdout.write(
+            f"(all {len(records)} hunch(es) already labeled — pass --all to see)\n"
+        )
+        return 0
+
+    for r in visible:
+        label_marker = f" [{_label_for(r.hunch_id, labeled)}]" if r.hunch_id in labeled else ""
+        sys.stdout.write(f"{r.hunch_id}  ({r.status}){label_marker}  {r.smell}\n")
+        if r.description:
+            for line in r.description.splitlines():
+                sys.stdout.write(f"            {line}\n")
+        sys.stdout.write("\n")
+    return 0
+
+
+def _label_for(hunch_id: str, labeled: dict[str, str]) -> str:
+    return labeled.get(hunch_id, "")
+
+
+def _cmd_label(ns: argparse.Namespace) -> int:
+    from hunch.journal.feedback import FeedbackWriter
+    from hunch.journal.hunches import read_current_hunches
+
+    replay_dir = _resolved_replay_dir(ns.replay_dir)
+    hunches_path = replay_dir / "hunches.jsonl"
+    if not hunches_path.exists():
+        sys.stderr.write(
+            f"hunch label: {hunches_path} does not exist — no hunches to label\n"
+        )
+        return 1
+
+    known_ids = {r.hunch_id for r in read_current_hunches(hunches_path)}
+    if ns.hunch_id not in known_ids:
+        sys.stderr.write(
+            f"hunch label: unknown hunch id {ns.hunch_id!r} "
+            f"(known: {', '.join(sorted(known_ids)) or '<none>'})\n"
+        )
+        return 1
+
+    import datetime as _dt
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    writer = FeedbackWriter(feedback_path=replay_dir / "feedback.jsonl")
+    writer.write_explicit(hunch_id=ns.hunch_id, label=ns.label, ts=ts)
+    sys.stdout.write(f"labeled {ns.hunch_id} as {ns.label}\n")
     return 0
 
 

@@ -17,6 +17,7 @@ Appendix A for the schema this module implements.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -74,3 +75,35 @@ class FeedbackWriter:
 
     def _append(self, entry: dict[str, Any]) -> None:
         append_json_line(self.feedback_path, entry)
+
+
+def read_labeled_hunch_ids(feedback_path: str | Path) -> dict[str, str]:
+    """Return `{hunch_id: latest_explicit_label}` from feedback.jsonl.
+
+    Only `channel == "explicit"` events contribute. If a hunch has been
+    labeled multiple times (e.g., skip then good), the latest wins —
+    file order is append order, which is chronological in v0.
+
+    Returns `{}` if the file doesn't exist. Unknown / malformed lines
+    are skipped silently; the reader is forgiving by design.
+    """
+    feedback_path = Path(feedback_path)
+    if not feedback_path.exists():
+        return {}
+    labels: dict[str, str] = {}
+    with open(feedback_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if d.get("channel") != "explicit":
+                continue
+            hid = d.get("hunch_id")
+            lbl = d.get("label")
+            if hid and lbl:
+                labels[hid] = lbl
+    return labels

@@ -121,6 +121,7 @@ class Runner:
     trigger_loop: TriggerLoop = field(init=False)
     parser_state: ParserState = field(init=False)
     transcript_path: Path = field(init=False)
+    log: Callable[[str], None] | None = None
     _stopped: bool = False
     _tick_counter: int = 0
 
@@ -148,7 +149,7 @@ class Runner:
         self.trigger_loop = TriggerLoop(
             critic=self.critic,
             bookmark_fn=lambda: self.writer.tick_seq,
-            on_tick_result=self._write_hunches,
+            on_tick_result=self._on_tick_result,
             interval_s=cfg.interval_s,
             poll_s=cfg.poll_s,
         )
@@ -159,9 +160,13 @@ class Runner:
 
     def step_once(self) -> None:
         """One iteration: capture new events, maybe fire a tick."""
+        tick_seq_before = self.writer.tick_seq
         self.parser_state = poll_once(
             self.transcript_path, self.writer, self.parser_state
         )
+        delta = self.writer.tick_seq - tick_seq_before
+        if delta > 0 and self.log is not None:
+            self.log(f"[capture] +{delta} events (tick_seq now {self.writer.tick_seq})")
         self.trigger_loop.step()
 
     def run_forever(self) -> None:
@@ -184,9 +189,13 @@ class Runner:
     # Internals
     # ------------------------------------------------------------------
 
-    def _write_hunches(self, hunches: list[Any]) -> None:
+    def _on_tick_result(self, hunches: list[Any]) -> None:
         self._tick_counter += 1
         ts = _utc_now_iso()
+        if self.log is not None:
+            self.log(
+                f"[tick t-{self._tick_counter:04d}] {len(hunches)} hunch(es) emitted"
+            )
         for hunch in hunches:
             hid = self.hunches_writer.allocate_id()
             self.hunches_writer.write_emit(
@@ -195,6 +204,9 @@ class Runner:
                 ts=ts,
                 emitted_by_tick=self._tick_counter,
             )
+            if self.log is not None:
+                smell = getattr(hunch, "smell", "<no smell>")
+                self.log(f"  - {hid} {smell}")
 
     def _install_signal_handlers(self) -> None:
         def _handler(signum, frame):  # noqa: ARG001 — signal API
