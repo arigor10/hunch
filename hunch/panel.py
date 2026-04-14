@@ -29,6 +29,7 @@ CI, tests, and environments where the TUI isn't needed.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ class PanelSnapshot:
     """One poll's view of the replay buffer, merged for display."""
     records: list[HunchRecord]
     labels: dict[str, str]
+    max_tick_seq: int = 0
 
     def visible(self, show_labeled: bool) -> list[HunchRecord]:
         if show_labeled:
@@ -59,11 +61,37 @@ class PanelSnapshot:
         return {"pending": pending, "surfaced": surfaced, "labeled": labeled}
 
 
+def read_max_tick_seq(conversation_path: Path) -> int:
+    """Return the highest `tick_seq` in conversation.jsonl, or 0 if the
+    file is absent / empty / entirely malformed.
+
+    This is a liveness cue for the TUI: it ticks up as the capture loop
+    writes new events, and sits still if the framework isn't running.
+    """
+    if not conversation_path.exists():
+        return 0
+    max_seq = 0
+    with open(conversation_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            seq = d.get("tick_seq")
+            if isinstance(seq, int) and seq > max_seq:
+                max_seq = seq
+    return max_seq
+
+
 def read_snapshot(replay_dir: Path) -> PanelSnapshot:
     """Read a consistent view of hunches + feedback from disk."""
     records = read_current_hunches(replay_dir / "hunches.jsonl")
     labels = read_labeled_hunch_ids(replay_dir / "feedback.jsonl")
-    return PanelSnapshot(records=records, labels=labels)
+    max_seq = read_max_tick_seq(replay_dir / "conversation.jsonl")
+    return PanelSnapshot(records=records, labels=labels, max_tick_seq=max_seq)
 
 
 # ---------------------------------------------------------------------------
@@ -186,8 +214,8 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             mode = "all" if self.show_labeled else "unlabeled"
             status_widget.update(
                 f"Hunch — {c['pending']} pending · {c['surfaced']} surfaced · "
-                f"{c['labeled']} labeled  ·  showing: {mode} "
-                f"({len(visible)} of {len(snap.records)})"
+                f"{c['labeled']} labeled  ·  events: {snap.max_tick_seq}  ·  "
+                f"showing: {mode} ({len(visible)} of {len(snap.records)})"
             )
             self._refresh_detail()
 

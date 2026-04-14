@@ -10,7 +10,8 @@ from __future__ import annotations
 from hunch.critic.protocol import Hunch, TriggeringRefs
 from hunch.journal.feedback import FeedbackWriter
 from hunch.journal.hunches import HunchesWriter
-from hunch.panel import PanelSnapshot, read_snapshot
+from hunch.capture.writer import ReplayBufferWriter
+from hunch.panel import PanelSnapshot, read_max_tick_seq, read_snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +134,48 @@ def test_counts_distinguish_pending_surfaced_labeled(tmp_path):
 def test_counts_empty_snapshot():
     snap = PanelSnapshot(records=[], labels={})
     assert snap.counts() == {"pending": 0, "surfaced": 0, "labeled": 0}
+
+
+# ---------------------------------------------------------------------------
+# read_max_tick_seq / liveness cue
+# ---------------------------------------------------------------------------
+
+def test_read_max_tick_seq_missing_file(tmp_path):
+    assert read_max_tick_seq(tmp_path / "nope.jsonl") == 0
+
+
+def test_read_max_tick_seq_empty_file(tmp_path):
+    p = tmp_path / "conv.jsonl"
+    p.write_text("")
+    assert read_max_tick_seq(p) == 0
+
+
+def test_read_max_tick_seq_returns_highest(tmp_path):
+    w = ReplayBufferWriter(replay_dir=tmp_path)
+    for i in range(3):
+        w.append_events(
+            [{"type": "text", "timestamp": f"2026-04-14T12:00:0{i}Z",
+              "role": "user", "content": f"m{i}"}],
+            project_roots=[str(tmp_path)],
+        )
+    assert read_max_tick_seq(w.conversation_path) == 3
+
+
+def test_read_max_tick_seq_tolerates_malformed(tmp_path):
+    p = tmp_path / "conv.jsonl"
+    p.write_text('garbage\n{"tick_seq": 5}\n{"tick_seq": 2}\n')
+    assert read_max_tick_seq(p) == 5
+
+
+def test_snapshot_exposes_max_tick_seq(tmp_path):
+    w = ReplayBufferWriter(replay_dir=tmp_path)
+    w.append_events(
+        [{"type": "text", "timestamp": "2026-04-14T12:00:00Z",
+          "role": "user", "content": "hi"}],
+        project_roots=[str(tmp_path)],
+    )
+    snap = read_snapshot(tmp_path)
+    assert snap.max_tick_seq == 1
 
 
 # ---------------------------------------------------------------------------
