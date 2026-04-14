@@ -63,6 +63,19 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="(planned) scaffold .hunch/ config")
     sub.add_parser("status", help="(planned) print replay-buffer / hunch counts")
 
+    hook = sub.add_parser("hook", help="Claude Code hook handlers (internal)")
+    hook_sub = hook.add_subparsers(dest="hook_name", metavar="<hook>")
+    ups = hook_sub.add_parser(
+        "user-prompt-submit",
+        help="UserPromptSubmit hook — inject pending hunches into prompt context",
+    )
+    ups.add_argument(
+        "--replay-dir",
+        type=Path,
+        default=None,
+        help="replay-buffer directory (default: .hunch/replay/ under cwd)",
+    )
+
     return p
 
 
@@ -102,6 +115,8 @@ def main(argv: list[str] | None = None) -> int:
     ns = parser.parse_args(argv)
     if ns.command == "run":
         return _cmd_run(ns)
+    if ns.command == "hook":
+        return _cmd_hook(ns)
     if ns.command in ("init", "status"):
         sys.stderr.write(
             f"hunch {ns.command}: not yet implemented (v0 skeleton).\n"
@@ -109,6 +124,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     parser.print_help()
     return 0
+
+
+def _cmd_hook(ns: argparse.Namespace) -> int:
+    if ns.hook_name == "user-prompt-submit":
+        from hunch.hook.user_prompt_submit import main as ups_main
+        argv = []
+        if ns.replay_dir is not None:
+            argv.extend(["--replay-dir", str(ns.replay_dir)])
+        return ups_main(argv)
+    sys.stderr.write(f"hunch hook: unknown hook '{ns.hook_name}'\n")
+    return 2
 
 
 if __name__ == "__main__":
