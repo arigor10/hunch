@@ -354,9 +354,20 @@ v0 minimum viable: chronological list with one-line smells; Scientist skims and 
 - Self-resolution detection — Critic notices on a later tick that a concern was addressed, marks the original suppressed without Scientist involvement.
 - Topic grouping — multiple hunches about the same artifact collapsed in the UI.
 
-**Q3: JSONL concurrency safety.** Invariant #4 says replay-buffer JSONLs are append-only and readers handle concurrent writes "gracefully." On modern Linux local filesystems (ext4, xfs, btrfs) the kernel serializes regular-file appends via inode locks, so in practice on a single host this mostly works. But the guarantee doesn't hold universally: NFS mounts don't serialize appends; Python's buffered I/O can, under conditions, translate one Python write into multiple `write(2)` syscalls that can interleave across writers; macOS APFS and FUSE filesystems have weaker guarantees than local ext4.
+**Q3: JSONL concurrency safety.** Invariant #4 says replay-buffer JSONLs are append-only and readers handle concurrent writes "gracefully." On modern Linux local filesystems (ext4, xfs, btrfs) the kernel serializes regular-file appends via inode locks; empirically, 8 writers × 100 × 16KB lines without any locking produced zero corrupt JSON. So on the target environment, plain `open("a")` + `write()` already holds the contract.
 
-Fix: every replay-buffer writer acquires `fcntl.flock(LOCK_EX)` on the target file before appending, releases after. The logical invariant (append-only) is unchanged; the lock is defense-in-depth that holds across filesystems and buffering regimes, not a fix for a specific reproducible corruption on Linux ext4. Centralized as a single `append_json_line(path, entry)` helper used by all four JSONL writers (`hunches.py`, `feedback.py`, and the two `_append_*` methods in `capture/writer.py`) so the invariant is enforced in one place.
+Fix is concentration, not correction. All four JSONL writers (`hunches.py`, `feedback.py`, and the two `_append_*` methods in `capture/writer.py`) now go through a single `append_json_line(path, entry)` helper that takes `fcntl.flock(LOCK_EX)` around the write. Two honest justifications:
+
+1. **Concentration.** One place to strengthen guarantees if we ever run on a filesystem where the ext4 guarantee doesn't hold, or change format to something needing more than `O_APPEND` atomicity.
+2. **Short-write retry.** Python's `BufferedWriter` will retry a partial `write(2)`; the lock keeps those retries contiguous.
+
+Caveats documented in `hunch/journal/append.py`:
+
+- Advisory `flock(LOCK_EX)` only blocks other lockful writers; a reader without `LOCK_SH` can still see torn lines on a filesystem without atomic writes. On ext4 this doesn't matter; current v0 readers don't take shared locks.
+- NFS is not a target; `flock` semantics are mount-option dependent there. If it ever becomes a target, `fcntl.lockf(F_SETLK)` is the portable choice.
+- The helper is about concurrency, not crash safety. `ENOSPC`, `SIGKILL`, or power loss can still leave a partial line.
+
+Contract test (`tests/test_journal_concurrency.py`) verifies: valid JSON on every line, correct total count, and every `(worker, idx)` pair present exactly once.
 
 ---
 
