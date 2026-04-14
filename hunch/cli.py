@@ -93,6 +93,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="replay-buffer directory (default: .hunch/replay/ under cwd)",
     )
 
+    pnl = sub.add_parser(
+        "panel",
+        help="launch side-panel TUI for reviewing and labeling hunches",
+    )
+    pnl.add_argument(
+        "--replay-dir",
+        type=Path,
+        default=None,
+        help="replay-buffer directory (default: .hunch/replay/ under cwd)",
+    )
+    pnl.add_argument(
+        "--poll",
+        type=float,
+        default=1.0,
+        help="seconds between replay-buffer refreshes (default: 1)",
+    )
+
     hook = sub.add_parser("hook", help="Claude Code hook handlers (internal)")
     hook_sub = hook.add_subparsers(dest="hook_name", metavar="<hook>")
     ups = hook_sub.add_parser(
@@ -152,6 +169,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list(ns)
     if ns.command == "label":
         return _cmd_label(ns)
+    if ns.command == "panel":
+        return _cmd_panel(ns)
     if ns.command in ("init", "status"):
         sys.stderr.write(
             f"hunch {ns.command}: not yet implemented (v0 skeleton).\n"
@@ -231,6 +250,14 @@ def _cmd_label(ns: argparse.Namespace) -> int:
     writer.write_explicit(hunch_id=ns.hunch_id, label=ns.label, ts=ts)
     sys.stdout.write(f"labeled {ns.hunch_id} as {ns.label}\n")
     return 0
+
+
+def _cmd_panel(ns: argparse.Namespace) -> int:
+    from hunch.panel import run as panel_run
+
+    replay_dir = _resolved_replay_dir(ns.replay_dir)
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    return panel_run(replay_dir=replay_dir, poll_s=ns.poll)
 
 
 def _cmd_hook(ns: argparse.Namespace) -> int:
