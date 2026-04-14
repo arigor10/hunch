@@ -188,6 +188,34 @@ Starting point. Will tune based on latency, cost, and quality. The numbers are c
 
 ---
 
+## Empirical status (pre-flight)
+
+Three small-sample pre-flights were run 2026-04-14 against anchor cases from the sibling critic project. Each N = 5; see `agentic_research_critic/data/preflight_results{,_critic,_falsepositive}/`.
+
+| Pre-flight | Question | Result |
+|---|---|---|
+| Researcher-as-discriminator | Does the Researcher validate polished hunches as real? | 5/5 validate |
+| Critic-as-generator | Does the Critic emit a plausible hunch from a polished trace? | 5/5 hit |
+| Critic specificity | Does the Critic stay silent on clean traces? | 4/5 quiet + 1 honest arithmetic catch |
+
+**What the pre-flights closed (short context):**
+
+- Sensitivity on curated traces — the Critic generates cited, grounded hunches matching anchor cases.
+- Specificity on curated clean traces — textbook exclusions (hyperparameter scans, reproduction within noise, import debugging, training progress) correctly produced `[]`.
+- Not just surface pattern-matching — the one "false positive" was a real arithmetic inconsistency in a trace hand-crafted as clean (observed KL ratio 2.625 where α² scaling predicts 4.0). The Critic did the arithmetic.
+- Nose-type coverage was broader than the adversarial review predicted, via two mechanisms: **(a) anomaly-visible-in-summary** — the contradiction is already latent in a `.md` the Researcher wrote. This is the meeting-room bet working, not a fragile shortcut; fresh eyes catching what the head-down author missed is exactly the mechanism we're building. **(b) Model-memorized reference values** — Sonnet caught a Llama-3.1-8B MMLU divergence because that baseline is in pretraining. Genuinely fragile: works for well-known benchmark/model pairs, fails silently for newer or less-known ones.
+
+**What remains open (all converge on the self-use gate):**
+
+- Long-context narrative drift. Pre-flight traces were short and polished; the real regime is multi-hour sessions with parenthetical claims, speculation phrased as fact, topic-switching. This is the dimension Hunch specifically targets.
+- Duplicate suppression via the `prior_hunches` block — design-only so far. First likely live failure: Critic re-raises the same concern on consecutive ticks.
+- Progress-pressured Researcher engagement. The 5/5 validate was zero-pressure, one-shot; a Researcher mid-plan may deflect rather than engage.
+- Real per-session FP rate. 4/5 on curated traces is an existence proof, not a calibration. What we care about is hunches-per-hour on a typical multi-hour session.
+
+All four unclosed dimensions ride on Scientist self-use — running Hunch on real sessions with narrative drift, progress pressure, and repeated context is the cheapest single test that covers them simultaneously.
+
+---
+
 ## Deferred decisions
 
 | Decision | Defer to | Revisit trigger |
