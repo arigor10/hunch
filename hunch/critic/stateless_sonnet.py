@@ -1,6 +1,6 @@
 """Stateless-Sonnet Critic (critic v0).
 
-In-process Python wrapping one Anthropic API call per tick. See
+In-process Python wrapping one Sonnet call per tick. See
 `docs/critic_v0.md` — this is the minimal implementation that speaks
 the Critic protocol and emits plausible hunches end-to-end.
 
@@ -12,22 +12,23 @@ Each tick:
   4. Parse the JSON response into `Hunch` objects (0 or 1 in v0).
   5. Return them to the framework, which writes emit events.
 
-Errors on the API call or response parsing are logged and swallowed:
+Errors on the model call or response parsing are logged and swallowed:
 the framework keeps ticking, and the Critic simply emits nothing this
 turn. Dropping a tick is strictly better than crashing the loop.
 
-The API client is injected via the `client` parameter so tests can
-substitute a fake without patching the Anthropic SDK directly. In
-production, `SonnetCritic()` constructs a real client from the
-environment on `init`.
+**Default model path: `claude` CLI subprocess.** This piggybacks on the
+user's Claude Code session (OAuth-authenticated to claude.ai), billed
+against their subscription rather than requiring a separate
+per-token ANTHROPIC_API_KEY. The Anthropic SDK path is still
+supported by injecting a `client=` at construction time (tests do this
+with a fake; users with API credits can pass a real SDK client).
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
-import sys
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -47,6 +48,7 @@ class SonnetCriticConfig:
     context: ContextConfig = field(default_factory=ContextConfig)
     prompt_path: Path | None = None  # None → packaged default
     temperature: float = 0.0
+    cli_timeout_s: float = 300.0  # only used when shelling out to `claude` CLI
 
 
 # ---------------------------------------------------------------------------
@@ -149,8 +151,8 @@ def parse_response(text: str) -> list[Hunch]:
 
 # A CallableClient is anything with `messages.create(...)` that returns an
 # object with `.content[0].text`. We type it loosely to avoid coupling to
-# the anthropic SDK at import time (so the module imports even on machines
-# without the SDK — tests inject a fake).
+# the anthropic SDK at import time. When `client is None`, the Critic
+# shells out to the `claude` CLI instead (the default production path).
 CallableClient = Any
 
 
@@ -160,8 +162,14 @@ class SonnetCritic:
 
     Instances are constructed by the framework via `critic_factory`
     (see `hunch/run.py`). Holds prompt template, config, replay-dir
-    handle (set in `init`), and an Anthropic client (constructed in
-    `init` or injected for tests).
+    handle (set in `init`), and an optional SDK client.
+
+    If `client is None` (default), each tick shells out to the `claude`
+    CLI. That path uses the caller's Claude Code session — no
+    ANTHROPIC_API_KEY required — and the user's subscription absorbs
+    the token cost. If a `client` is provided, the SDK path is used
+    instead (tests inject a fake; users with API credits can pass a
+    real `anthropic.Anthropic()`).
     """
     config: SonnetCriticConfig = field(default_factory=SonnetCriticConfig)
     client: CallableClient | None = None
@@ -183,8 +191,7 @@ class SonnetCritic:
             raise RuntimeError("SonnetCritic.init: 'replay_dir' missing from config")
         self._replay_dir = Path(replay_dir)
         self._template = _load_prompt_template(self.config.prompt_path)
-        if self.client is None:
-            self.client = _build_default_client()
+        # No SDK client construction by default — the CLI path is used.
         self._initialized = True
 
     def tick(
@@ -222,7 +229,10 @@ class SonnetCritic:
 
     def _call_model(self, prompt: str) -> str:
         if self.client is None:
-            raise RuntimeError("SonnetCritic has no client")
+            return self._call_via_cli(prompt)
+        return self._call_via_sdk(prompt)
+
+    def _call_via_sdk(self, prompt: str) -> str:
         response = self.client.messages.create(
             model=self.config.model,
             max_tokens=self.config.max_tokens,
@@ -242,31 +252,36 @@ class SonnetCritic:
             return str(first.get("text", ""))
         return ""
 
+    def _call_via_cli(self, prompt: str) -> str:
+        """Shell out to the `claude` CLI.
+
+        Uses `--print` (one-shot, no interactive loop) and pipes the
+        prompt via stdin. Passing it via `-p <prompt>` hits Linux's
+        ARG_MAX (~128KB) once prompts grow, which Critic v1 prompts
+        routinely do. Runs from `/tmp` to avoid inheriting any
+        project-specific hooks / settings from the caller's cwd.
+        Raises on non-zero exit or timeout so the tick error-swallower
+        in `tick()` logs and moves on.
+        """
+        result = subprocess.run(
+            [
+                "claude",
+                "--print",
+                "--model", self.config.model,
+            ],
+            input=prompt,
+            cwd="/tmp",
+            capture_output=True,
+            text=True,
+            timeout=self.config.cli_timeout_s,
+        )
+        if result.returncode != 0:
+            stderr_tail = (result.stderr or "").strip()[-400:]
+            raise RuntimeError(
+                f"claude CLI exited {result.returncode}: {stderr_tail}"
+            )
+        return result.stdout
+
     def _log(self, msg: str) -> None:
         if self.log is not None:
             self.log(msg)
-
-
-# ---------------------------------------------------------------------------
-# Default client construction
-# ---------------------------------------------------------------------------
-
-def _build_default_client() -> CallableClient:
-    """Build an Anthropic client from the environment.
-
-    Deferred so machines without the SDK can still import this module
-    (tests use an injected fake client).
-    """
-    try:
-        import anthropic  # type: ignore
-    except ImportError as e:
-        raise RuntimeError(
-            "anthropic SDK is required for SonnetCritic; "
-            "install with `pipx inject hunch anthropic` "
-            "or pass a client= at construction time"
-        ) from e
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.stderr.write(
-            "SonnetCritic: ANTHROPIC_API_KEY is not set — API calls will fail\n"
-        )
-    return anthropic.Anthropic()

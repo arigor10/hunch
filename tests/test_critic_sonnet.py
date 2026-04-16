@@ -2,13 +2,16 @@
 
 The Anthropic API call is stubbed via an injected client so these
 tests run offline. We cover prompt rendering, response parsing,
-and error swallowing.
+error swallowing, and both the SDK and CLI call paths.
 """
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
+from hunch.critic import stateless_sonnet
 from hunch.critic.context import TickContext
 from hunch.critic.stateless_sonnet import (
     SonnetCritic,
@@ -215,3 +218,73 @@ def test_shutdown_flips_initialized_flag(tmp_path):
     critic.shutdown()
     with pytest.raises(RuntimeError, match="before init"):
         critic.tick(tick_id="t-0001", bookmark_prev=0, bookmark_now=0)
+
+
+# ---------------------------------------------------------------------------
+# CLI path (default — no SDK client injected)
+# ---------------------------------------------------------------------------
+
+class _FakeCompletedProcess:
+    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def test_tick_cli_path_invokes_claude_subprocess(tmp_path, monkeypatch):
+    """client=None is the default production path → shells out to `claude`."""
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["kwargs"] = kwargs
+        return _FakeCompletedProcess(stdout="[]\n")
+
+    monkeypatch.setattr(stateless_sonnet.subprocess, "run", fake_run)
+
+    cfg = SonnetCriticConfig(model="claude-sonnet-4-6")
+    critic = SonnetCritic(config=cfg)  # no client!
+    critic.init({"replay_dir": str(tmp_path)})
+    out = critic.tick(tick_id="t-0001", bookmark_prev=0, bookmark_now=0)
+    assert out == []
+    assert seen["cmd"][0] == "claude"
+    assert "--print" in seen["cmd"]
+    assert "--model" in seen["cmd"]
+    model_idx = seen["cmd"].index("--model")
+    assert seen["cmd"][model_idx + 1] == "claude-sonnet-4-6"
+    # Prompt is piped via stdin (not -p) to avoid Linux ARG_MAX (~128KB)
+    # with large accumulator prompts.
+    assert "-p" not in seen["cmd"]
+    assert "You are the Critic" in seen["kwargs"]["input"]
+    # Runs from /tmp to skip project-local hooks.
+    assert seen["kwargs"]["cwd"] == "/tmp"
+
+
+def test_tick_cli_path_nonzero_exit_is_swallowed(tmp_path, monkeypatch):
+    def fake_run(cmd, **kwargs):
+        return _FakeCompletedProcess(
+            stdout="", stderr="auth error: not logged in", returncode=1
+        )
+
+    monkeypatch.setattr(stateless_sonnet.subprocess, "run", fake_run)
+
+    logs: list[str] = []
+    critic = SonnetCritic(log=logs.append)  # no client → CLI path
+    critic.init({"replay_dir": str(tmp_path)})
+    out = critic.tick(tick_id="t-0001", bookmark_prev=0, bookmark_now=0)
+    assert out == []
+    assert any("claude CLI exited 1" in m for m in logs)
+
+
+def test_tick_cli_path_timeout_is_swallowed(tmp_path, monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+
+    monkeypatch.setattr(stateless_sonnet.subprocess, "run", fake_run)
+
+    logs: list[str] = []
+    critic = SonnetCritic(log=logs.append)
+    critic.init({"replay_dir": str(tmp_path)})
+    out = critic.tick(tick_id="t-0001", bookmark_prev=0, bookmark_now=0)
+    assert out == []
+    assert any("TimeoutExpired" in m or "timed out" in m.lower() for m in logs)
