@@ -289,8 +289,41 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             self._refresh_snapshot()
 
     app = HunchPanel(replay_dir=replay_dir, poll_s=poll_s)
-    app.run()
+    try:
+        # mouse=False: the panel has no click/scroll interactions and
+        # leaked mouse-reporting escape sequences on abnormal exit
+        # (e.g. alt-key collisions with tmux) turn the parent shell into
+        # a gibberish generator. CLI users don't expect mouse anyway.
+        app.run(mouse=False)
+    finally:
+        # Belt-and-suspenders: even with mouse=False, if Textual crashed
+        # mid-init or left the terminal in alt-screen / hidden-cursor
+        # state, restore it explicitly. Safe to emit unconditionally —
+        # these are "disable X" sequences; terminals that weren't in X
+        # just ignore them.
+        _restore_terminal()
     return 0
+
+
+def _restore_terminal() -> None:
+    """Unconditional terminal cleanup after the TUI exits.
+
+    Disables every mouse-reporting mode Textual (or any other TUI) may
+    have enabled, re-shows the cursor, and exits the alternate screen
+    buffer. Written to stdout rather than stderr so it reaches the
+    terminal the panel was rendering to.
+    """
+    import sys
+    sys.stdout.write(
+        "\x1b[?1000l"   # disable X11 mouse reporting
+        "\x1b[?1002l"   # disable cell-motion mouse tracking
+        "\x1b[?1003l"   # disable all-motion mouse tracking
+        "\x1b[?1006l"   # disable SGR-extended mouse mode
+        "\x1b[?1015l"   # disable URXVT-extended mouse mode
+        "\x1b[?25h"     # show cursor
+        "\x1b[?1049l"   # exit alternate screen buffer
+    )
+    sys.stdout.flush()
 
 
 # ---------------------------------------------------------------------------
