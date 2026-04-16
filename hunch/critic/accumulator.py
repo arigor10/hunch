@@ -280,11 +280,14 @@ class CriticPromptStream:
     # exact per-event contributions instead of the chars/cpt estimate.
     _event_tokens: list[float] = field(default_factory=list, repr=False)
     # Empirical chars-per-token ratio derived from observations. EMA
-    # over `rendered_chars / input_tokens`. None until the first obs.
-    # Used for artifact budgeting and post-purge fixed-region estimates
-    # so the default `chars_per_token=3.5` doesn't systematically
-    # under-count tokens for markdown-heavy prompts (~2.9 in practice).
+    # over delta_chars / delta_tokens between consecutive observations.
+    # Delta-based so that any constant overhead from the model provider
+    # (e.g. `claude --print` injects a ~12k-token system prompt that
+    # is NOT in our rendered chars) cancels out.
     _empirical_chars_per_token: float | None = field(default=None, repr=False)
+    # `len(self.render())` at the most recent `update_observed_tokens`
+    # call, used to compute the char-delta for the next ratio update.
+    _prev_rendered_chars: int | None = field(default=None, repr=False)
 
     # ------------------------------------------------------------------
     # Append API
@@ -429,17 +432,28 @@ class CriticPromptStream:
         estimates for the next tick.
         """
         input_tokens = int(input_tokens)
-
-        # Update empirical chars/token ratio (EMA, 0.3 weight on new).
         rendered_chars = len(self.render())
-        if input_tokens > 0:
-            empirical = rendered_chars / input_tokens
-            if self._empirical_chars_per_token is None:
-                self._empirical_chars_per_token = empirical
-            else:
-                self._empirical_chars_per_token = (
-                    0.3 * empirical + 0.7 * self._empirical_chars_per_token
-                )
+
+        # Update empirical chars/token ratio from DELTAS between
+        # consecutive observations. Using deltas cancels any constant
+        # system-prompt overhead (e.g. `claude --print` adds ~12k
+        # tokens not reflected in our rendered chars). Requires two
+        # observations, so the ratio stays at the default on tick 0.
+        if (
+            self._observed_prefix_tokens is not None
+            and self._prev_rendered_chars is not None
+        ):
+            delta_chars = rendered_chars - self._prev_rendered_chars
+            delta_tokens = input_tokens - self._observed_prefix_tokens
+            if delta_chars > 50 and delta_tokens > 10:
+                empirical = delta_chars / delta_tokens
+                if self._empirical_chars_per_token is None:
+                    self._empirical_chars_per_token = empirical
+                else:
+                    self._empirical_chars_per_token = (
+                        0.3 * empirical + 0.7 * self._empirical_chars_per_token
+                    )
+        self._prev_rendered_chars = rendered_chars
 
         # Re-attribute the timeline-portion tokens across events by
         # character weight. After this, `sum(_event_tokens)` tracks the
@@ -564,6 +578,10 @@ class CriticPromptStream:
             post_fixed_tokens + int(round(sum(kept_event_tokens)))
         )
         self._observed_timeline_len = len(self.timeline)
+        # Reset prev_rendered_chars: the prompt changed shape (new
+        # fixed regions), so the next delta-based ratio update should
+        # start fresh from the first post-purge observation.
+        self._prev_rendered_chars = None
 
         return len(dropped)
 

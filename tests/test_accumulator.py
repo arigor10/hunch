@@ -466,45 +466,58 @@ def test_update_observed_tokens_distributes_timeline_portion_by_char_weight():
     assert s._event_tokens[1] > 5 * s._event_tokens[0]
 
 
-def test_empirical_chars_per_token_is_set_on_first_observation():
+def test_empirical_chars_per_token_needs_two_observations():
+    """Delta-based ratio requires two consecutive observations to
+    cancel the system-prompt overhead. First observation alone doesn't
+    set the empirical ratio."""
     s = _stream()
     s.append_chunk_text(0, "user", "x" * 350)
-    assert s._empirical_chars_per_token is None
     s.update_observed_tokens(100)
+    # First obs: no prior → no delta → empirical still None.
+    assert s._empirical_chars_per_token is None
+    s.append_chunk_text(1, "user", "y" * 350)
+    s.update_observed_tokens(200)
+    # Second obs: delta_chars > 0, delta_tokens > 0 → empirical set.
     assert s._empirical_chars_per_token is not None
-    # Sanity bound: render has some overhead so it can't be below ~3.0.
     assert s._empirical_chars_per_token > 0
 
 
 def test_empirical_chars_per_token_ema_moves_toward_new_observations():
     s = _stream()
-    s.append_chunk_text(0, "user", "a" * 100)
-    s.update_observed_tokens(100)  # high ratio (very long text, few tokens)
+    s.append_chunk_text(0, "user", "a" * 500)
+    s.update_observed_tokens(100)
+    # First obs → no empirical yet.
+    s.append_chunk_text(1, "user", "b" * 500)
+    s.update_observed_tokens(200)
+    # Second obs → empirical set from first delta.
     first = s._empirical_chars_per_token
-    # Append a tiny event and observe with a ratio that should pull the EMA.
-    s.append_chunk_text(1, "user", "b")
-    s.update_observed_tokens(10_000)  # implausibly many tokens → small ratio
+    assert first is not None
+    # Append a tiny event and observe with a much larger token delta.
+    s.append_chunk_text(2, "user", "c" * 500)
+    s.update_observed_tokens(1000)  # 800 token delta for ~500 char delta → low ratio
     second = s._empirical_chars_per_token
-    assert second != first
+    assert second is not None
     assert second < first  # moved down toward the lower ratio
 
 
 def test_projected_tokens_uses_empirical_ratio_for_new_events():
-    """After observing a markdown-dense prompt (ratio ~2.9), newly
-    appended events are projected using that ratio — not the default 3.5."""
+    """After two observations establish an empirical ratio lower than
+    the default 3.5, newly appended events are projected using that
+    empirical ratio — producing more tokens per char."""
     s = CriticPromptStream(preamble="SYSTEM", chars_per_token=3.5)
-    # Seed with a realistic observation (empirical < default).
+    # Two observations to establish delta-based empirical ratio.
     s.append_chunk_text(0, "user", "x" * 1000)
-    s.update_observed_tokens(400)  # ~2.5 chars/tok including overhead
+    s.update_observed_tokens(500)
+    s.append_chunk_text(1, "user", "y" * 1000)
+    s.update_observed_tokens(900)  # delta ~1000 chars / 400 tokens → ~2.5 cpt
     assert s._empirical_chars_per_token is not None
     assert s._empirical_chars_per_token < 3.5
     baseline = s.projected_tokens()
     # Append more and verify projection uses the smaller empirical ratio:
     # same delta chars should produce MORE projected tokens than the
     # default 3.5 estimate would.
-    s.append_chunk_text(1, "user", "y" * 100)
+    s.append_chunk_text(2, "user", "z" * 100)
     delta_empirical = s.projected_tokens() - baseline
-    # Check the same chars under the default 3.5:
     import math
     delta_default = max(1, math.floor(len(s.timeline[-1].text) / 3.5) + 1)
     assert delta_empirical >= delta_default
