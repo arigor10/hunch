@@ -83,7 +83,14 @@ def run_replay(
     max_events: int | None = None,
     allow_existing: bool = False,
 ) -> ReplayResult:
-    """Drive a Critic through a pre-parsed event stream.
+    """Drive a Critic through a pre-parsed event stream, writing a
+    fresh replay buffer as we go.
+
+    Most callers should prefer `run_replay_from_claude_log` (parses a
+    raw Claude .jsonl first) or `run_replay_from_dir` (drives over an
+    already-populated replay buffer). This entry point exists for
+    synthetic event sources — tests, custom parsers, the rare case
+    where events come from somewhere other than a Claude log.
 
     Args:
       events: flat, timestamp-ordered list of parser events.
