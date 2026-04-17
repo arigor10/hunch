@@ -426,6 +426,20 @@ Contract test (`tests/test_journal_concurrency.py`) verifies: valid JSON on ever
 
 Current state of a hunch is computed by folding events in timestamp order. The file is *strictly* append-only; readers are expected to handle concurrent writes (new events appearing while being read) gracefully.
 
+### Bookmark window semantics
+
+`bookmark_prev` and `bookmark_now` are recorded on emit so offline evaluators can reconstruct exactly what the Critic was looking at — not the *whole* replay state it could access, but the **window that convinced the Trigger to fire this tick**.
+
+- `bookmark_now` — the highest `tick_seq` the Critic had in view when it emitted. Fixes causality: anything with `tick_seq > bookmark_now` happened after the fact and must not be treated as evidence.
+- `bookmark_prev` — the `tick_seq` the previous tick stopped at. The half-open range `(bookmark_prev, bookmark_now]` is the **freshly-arrived window** that pushed Trigger over its threshold.
+
+The pair is a range rather than a single point because the frame "what's new vs what was already on the table" is load-bearing for downstream evaluators:
+
+- **Novelty judging.** The judge scans all dialogue with `tick_seq ≤ bookmark_now` for already-raised concerns. The divider at `bookmark_prev` doesn't gate the search — anything said anywhere before `bookmark_now` invalidates strict novelty. The divider is reasoning aid: it lets the judge articulate *where* the match lies (prior-context redundancy vs same-window concurrence vs genuine first voice).
+- **Human labeling.** Same divider, same purpose — it makes "novel vs redundant" legible at a glance, which is the hard part of the annotation task.
+
+Offline evaluators that need this attribution live in the eval harness, not in the framework — see `agentic_research_critic/docs/eval_infrastructure.md` for the novelty-judge contract.
+
 `.hunch/replay/feedback.jsonl`:
 
 ```jsonc
