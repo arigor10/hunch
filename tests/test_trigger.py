@@ -95,7 +95,7 @@ def test_step_does_not_fire_before_interval(tmp_path):
     loop = TriggerLoop(
         critic=c,
         bookmark_fn=lambda: bookmark["v"],
-        on_tick_result=results.append,
+        on_tick_result=lambda hs, bp, bn: results.append((hs, bp, bn)),
         interval_s=10.0,
         clock=clock,
         sleep=lambda _: None,
@@ -134,7 +134,7 @@ def test_step_fires_with_right_bookmarks_and_tick_id():
     loop = TriggerLoop(
         critic=c,
         bookmark_fn=lambda: bookmark["v"],
-        on_tick_result=results.append,
+        on_tick_result=lambda hs, bp, bn: results.append((hs, bp, bn)),
         interval_s=10.0,
         clock=clock,
         sleep=lambda _: None,
@@ -148,7 +148,8 @@ def test_step_fires_with_right_bookmarks_and_tick_id():
         "bookmark_prev": 0,
         "bookmark_now": 3,
     }
-    assert results == [[]]  # StubCritic returns no hunches
+    # StubCritic returns no hunches; callback sees bookmarks anyway.
+    assert results == [([], 0, 3)]
 
     # Second tick: advance more, bookmark grows.
     clock.advance(11.0)
@@ -159,6 +160,7 @@ def test_step_fires_with_right_bookmarks_and_tick_id():
         "bookmark_prev": 3,
         "bookmark_now": 8,
     }
+    assert results[-1] == ([], 3, 8)
 
 
 def test_step_clears_in_flight_even_if_critic_raises():
@@ -199,13 +201,15 @@ def test_step_forwards_hunches_to_callback():
     loop = TriggerLoop(
         critic=_HunchCritic(),
         bookmark_fn=lambda: 5,
-        on_tick_result=received.append,
+        on_tick_result=lambda hs, bp, bn: received.append((hs, bp, bn)),
         interval_s=10.0,
         clock=clock,
         sleep=lambda _: None,
     )
     assert loop.step() is True
-    assert received == [hunches]
+    # Callback gets the hunch list AND the bookmark window — offline
+    # evaluators rely on both to pull the Critic's context slice.
+    assert received == [(hunches, 0, 5)]
 
 
 # ---------------------------------------------------------------------------

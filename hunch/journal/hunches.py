@@ -48,6 +48,8 @@ class HunchRecord:
     hunch_id: str
     emitted_ts: str
     emitted_by_tick: int
+    bookmark_prev: int
+    bookmark_now: int
     smell: str
     description: str
     triggering_refs: dict[str, list[str]]
@@ -99,14 +101,26 @@ class HunchesWriter:
         hunch_id: str,
         ts: str,
         emitted_by_tick: int,
+        *,
+        bookmark_prev: int,
+        bookmark_now: int,
     ) -> None:
         """Append an emit event for a freshly-minted hunch.
 
         The hunch's initial status is implicit: any reader folding
         events treats an emit as `status="pending"` until a later
         status_change event says otherwise.
+
+        `bookmark_prev`/`bookmark_now` identify the exact replay-buffer
+        window the Critic was evaluating. Recorded on emit (rather than
+        recomputed later) so offline evaluators can pull the same
+        dialogue slice the Critic "saw" — essential for novelty /
+        duplicate-detection judges.
         """
-        record = hunch_emit_record(hunch, hunch_id, ts, emitted_by_tick)
+        record = hunch_emit_record(
+            hunch, hunch_id, ts, emitted_by_tick,
+            bookmark_prev=bookmark_prev, bookmark_now=bookmark_now,
+        )
         self._append(record)
 
     def write_status_change(
@@ -207,10 +221,21 @@ def read_current_hunches(hunches_path: str | Path) -> list[HunchRecord]:
                     # Duplicate emit for the same id — keep the first,
                     # ignore the second. Dedup contract from framework_v0 §3.
                     continue
+                # Legacy emit events (pre-bookmark-field) default to
+                # -1 so readers can tell "unknown" from a real 0.
+                # If either field is missing OR the pair shrinks
+                # (hand-edited / corrupted), treat as unknown rather
+                # than serving a window where now < prev.
+                bp = d.get("bookmark_prev", -1)
+                bn = d.get("bookmark_now", -1)
+                if bp == -1 or bn == -1 or bn < bp:
+                    bp = bn = -1
                 records[hid] = HunchRecord(
                     hunch_id=hid,
                     emitted_ts=d.get("ts", ""),
                     emitted_by_tick=d.get("emitted_by_tick", -1),
+                    bookmark_prev=bp,
+                    bookmark_now=bn,
                     smell=d.get("smell", ""),
                     description=d.get("description", ""),
                     triggering_refs=d.get("triggering_refs") or {},

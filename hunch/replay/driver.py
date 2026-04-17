@@ -148,10 +148,10 @@ def run_replay(
             ts_raw = event.get("timestamp", "")
             bookmark_pre_event = writer.tick_seq
 
-            # Write first so that current_bookmark reflects the event
+            # Write first so that bookmark_now reflects the event
             # that's about to be considered for triggering.
             writer.append_events([event], project_roots)
-            current_bookmark = writer.tick_seq
+            bookmark_now = writer.tick_seq
 
             state, last_sim_now = _drive_one_event(
                 ctx=ctx,
@@ -161,7 +161,7 @@ def run_replay(
                 etype=etype,
                 ts_raw=ts_raw,
                 bookmark_pre_event=bookmark_pre_event,
-                current_bookmark=current_bookmark,
+                bookmark_now=bookmark_now,
                 last_sim_now=last_sim_now,
             )
     finally:
@@ -278,7 +278,7 @@ def run_replay_from_dir(
                 etype=te.type,
                 ts_raw=te.timestamp,
                 bookmark_pre_event=bookmark_pre_event,
-                current_bookmark=te.tick_seq,
+                bookmark_now=te.tick_seq,
                 last_sim_now=last_sim_now,
             )
             bookmark_pre_event = te.tick_seq
@@ -310,7 +310,7 @@ def _drive_one_event(
     etype: str,
     ts_raw: str,
     bookmark_pre_event: int,
-    current_bookmark: int,
+    bookmark_now: int,
     last_sim_now: float,
 ) -> tuple[TriggerV1State, float]:
     """Process one event: clamp sim_now, inject virtual ticks into the gap,
@@ -318,8 +318,11 @@ def _drive_one_event(
 
     Shared between `run_replay` (events-in, writer-backed) and
     `run_replay_from_dir` (loaded-from-replay-dir, read-only). Both
-    callers are expected to have already assigned `current_bookmark`
+    callers are expected to have already assigned `bookmark_now`
     (via writer.tick_seq++ or by reading the loaded event's tick_seq).
+    `bookmark_pre_event` is the buffer state *before* this event was
+    appended — used by virtual-tick math to check "has anything new
+    arrived since the last tick?" without counting this event yet.
     """
     parsed_ts = _parse_ts(ts_raw)
     if parsed_ts is None:
@@ -352,7 +355,7 @@ def _drive_one_event(
             ctx=ctx,
             state=state,
             now=vt,
-            current_bookmark=bookmark_pre_event,
+            bookmark_now=bookmark_pre_event,
             event_index=event_index,
             ts_raw_for_record="",
             is_virtual=True,
@@ -362,12 +365,12 @@ def _drive_one_event(
     last_sim_now = sim_now
     ctx.result.events_consumed += 1
 
-    if decide_tick_v1(state, sim_now, current_bookmark, etype, cfg):
+    if decide_tick_v1(state, sim_now, bookmark_now, etype, cfg):
         state = _fire_tick(
             ctx=ctx,
             state=state,
             now=sim_now,
-            current_bookmark=current_bookmark,
+            bookmark_now=bookmark_now,
             event_index=event_index,
             ts_raw_for_record=ts_raw,
             is_virtual=False,
@@ -381,7 +384,7 @@ def _fire_tick(
     ctx: _Ctx,
     state: TriggerV1State,
     now: float,
-    current_bookmark: int,
+    bookmark_now: int,
     event_index: int,
     ts_raw_for_record: str,
     is_virtual: bool,
@@ -391,13 +394,13 @@ def _fire_tick(
     in_flight cleared)."""
     ctx.tick_counter += 1
     tick_id = f"t-{ctx.tick_counter:04d}"
-    prev_bookmark = state.last_tick_bookmark
-    state = mark_tick_started_v1(state, now, current_bookmark)
+    bookmark_prev = state.last_tick_bookmark
+    state = mark_tick_started_v1(state, now, bookmark_now)
     try:
         hunches = ctx.critic.tick(
             tick_id=tick_id,
-            bookmark_prev=prev_bookmark,
-            bookmark_now=current_bookmark,
+            bookmark_prev=bookmark_prev,
+            bookmark_now=bookmark_now,
         )
     finally:
         state = mark_tick_finished_v1(state)
@@ -405,14 +408,17 @@ def _fire_tick(
     ctx.result.ticks_fired += 1
     if is_virtual:
         ctx.result.virtual_ticks_fired += 1
-    _persist_hunches(hunches, ctx.hunches_writer, ts_raw_for_record, ctx.tick_counter)
+    _persist_hunches(
+        hunches, ctx.hunches_writer, ts_raw_for_record, ctx.tick_counter,
+        bookmark_prev=bookmark_prev, bookmark_now=bookmark_now,
+    )
     ctx.result.hunches_emitted += len(hunches)
     ctx.result.tick_log.append({
         "tick_id": tick_id,
         "sim_now": now,
         "event_index": event_index,
-        "bookmark_prev": prev_bookmark,
-        "bookmark_now": current_bookmark,
+        "bookmark_prev": bookmark_prev,
+        "bookmark_now": bookmark_now,
         "hunch_count": len(hunches),
         "virtual": is_virtual,
     })
@@ -420,7 +426,7 @@ def _fire_tick(
         kind = "virtual " if is_virtual else ""
         ctx.on_log(
             f"[replay] {kind}{tick_id} @ event {event_index} "
-            f"(bookmark {prev_bookmark}→{current_bookmark}) "
+            f"(bookmark {bookmark_prev}→{bookmark_now}) "
             f"hunches={len(hunches)}"
         )
     return state
@@ -482,6 +488,9 @@ def _persist_hunches(
     writer: HunchesWriter,
     ts: str,
     tick_num: int,
+    *,
+    bookmark_prev: int,
+    bookmark_now: int,
 ) -> None:
     """Append each hunch as an emit event in hunches.jsonl, mirroring live."""
     for hunch in hunches:
@@ -491,6 +500,8 @@ def _persist_hunches(
             hunch_id=hid,
             ts=ts or _dt.datetime.now(_dt.timezone.utc).isoformat(),
             emitted_by_tick=tick_num,
+            bookmark_prev=bookmark_prev,
+            bookmark_now=bookmark_now,
         )
 
 

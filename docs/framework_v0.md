@@ -407,6 +407,8 @@ Contract test (`tests/test_journal_concurrency.py`) verifies: valid JSON on ever
   "hunch_id": "h-0007",
   "ts": "2026-04-14T10:23:15Z",
   "emitted_by_tick": 87,
+  "bookmark_prev": 412,
+  "bookmark_now": 437,
   "smell": "3× discrepancy between calibration runs",
   "description": "...",
   "triggering_refs": { "chunks": ["c-0040","c-0042"], "artifacts": ["writeups/exp_042.md"] }

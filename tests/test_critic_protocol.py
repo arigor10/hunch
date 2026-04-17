@@ -69,12 +69,16 @@ def test_hunch_emit_record_matches_appendix_shape():
         hunch_id="h-0007",
         ts="2026-04-14T10:23:15Z",
         emitted_by_tick=87,
+        bookmark_prev=150,
+        bookmark_now=164,
     )
     # Shape per framework_v0.md Appendix A
     assert rec["type"] == "emit"
     assert rec["hunch_id"] == "h-0007"
     assert rec["ts"] == "2026-04-14T10:23:15Z"
     assert rec["emitted_by_tick"] == 87
+    assert rec["bookmark_prev"] == 150
+    assert rec["bookmark_now"] == 164
     assert rec["smell"] == h.smell
     assert rec["description"] == h.description
     assert rec["triggering_refs"] == {
@@ -85,6 +89,19 @@ def test_hunch_emit_record_matches_appendix_shape():
     assert "diagnostic" not in rec
     assert "confidence" not in rec
     assert "who" not in rec
+
+
+def test_hunch_emit_record_rejects_shrinking_bookmark_window():
+    # The replay buffer's tick_seq is strictly monotonic, so a tick's
+    # window can never shrink. If the framework ever hands us
+    # bookmark_now < bookmark_prev that's a wiring bug we want to
+    # catch at write time — not discover later from a corrupted journal.
+    h = Hunch(smell="s", description="d")
+    with pytest.raises(ValueError, match="bookmark_now"):
+        hunch_emit_record(
+            h, hunch_id="h-0001", ts="t1", emitted_by_tick=1,
+            bookmark_prev=17, bookmark_now=5,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -186,6 +186,39 @@ def test_hunches_persist_to_hunches_jsonl(tmp_path: Path):
     assert records[0]["type"] == "emit"
     assert records[0]["hunch_id"] == "h-0001"
     assert records[0]["smell"] == "smell at t-0001"
+    # bookmark_prev/bookmark_now identify the Critic's window for
+    # this tick — offline evaluators (novelty, duplicate) rely on
+    # these to pull the same slice the Critic "saw".
+    assert records[0]["bookmark_prev"] == critic.tick_log[-1]["prev"]
+    assert records[0]["bookmark_now"] == critic.tick_log[-1]["now"]
+
+
+def test_persisted_hunch_bookmarks_match_tick_window(tmp_path: Path):
+    # Emit hunches at several ticks across an event stream and verify
+    # the bookmark fields in hunches.jsonl align with the tick log.
+    proj = "/tmp/proj"
+    cfg = TriggerV1Config(silence_s=30.0, min_debounce_s=60.0, max_interval_s=120.0)
+    events = [
+        _write(0.0, f"{proj}/a.md", "a"),      # hot → tick 1
+        _asst(10.0, "thinking"),
+        _asst(65.0, "more"),                   # silence → tick 2
+        _write(140.0, f"{proj}/b.md", "b"),    # hot → tick 3 (first passing debounce)
+    ]
+    critic = _RecordingCritic(emit_at={1, 2, 3})
+    run_replay(
+        events=events, project_roots=[proj],
+        replay_dir=tmp_path / "replay", critic=critic, trigger_config=cfg,
+    )
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "replay" / "hunches.jsonl").read_text().splitlines()
+    ]
+    # One hunch per emit_at tick, in emission order.
+    assert [r["hunch_id"] for r in records] == ["h-0001", "h-0002", "h-0003"]
+    for rec, logged in zip(records, critic.tick_log):
+        assert rec["bookmark_prev"] == logged["prev"]
+        assert rec["bookmark_now"] == logged["now"]
+        assert rec["bookmark_now"] >= rec["bookmark_prev"]
 
 
 def test_replay_dir_gets_full_layout(tmp_path: Path):

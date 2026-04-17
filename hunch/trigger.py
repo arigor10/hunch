@@ -101,9 +101,12 @@ class TriggerLoop:
       bookmark_fn: returns the current replay-buffer tick_seq. Called
         on every iteration; must be cheap (e.g. a counter read, not a
         file scan).
-      on_tick_result: optional callback invoked with the Hunch list the
-        Critic returned. Wire this to the journal (HunchesWriter) when
-        the framework assembles itself end-to-end.
+      on_tick_result: optional callback invoked as
+        `(hunches, bookmark_prev, bookmark_now)` with the Hunch list
+        the Critic returned plus the bookmark window it was evaluating.
+        Wire this to the journal (HunchesWriter) when the framework
+        assembles itself end-to-end; bookmarks are recorded on emit
+        so offline evaluators can pull the same dialogue slice.
       interval_s: minimum seconds between tick starts.
       poll_s: how often the loop wakes up to check. Must be ≤
         interval_s; smaller values give more responsive firing at the
@@ -117,7 +120,7 @@ class TriggerLoop:
     """
     critic: Critic
     bookmark_fn: Callable[[], int]
-    on_tick_result: Callable[[list[Any]], None] | None = None
+    on_tick_result: Callable[[list[Any], int, int], None] | None = None
     interval_s: float = 10.0
     poll_s: float = 1.0
     clock: Callable[[], float] = time.monotonic
@@ -138,27 +141,27 @@ class TriggerLoop:
         deterministically without touching sleep / threads.
         """
         now = self.clock()
-        bookmark = self.bookmark_fn()
-        if not decide_tick(self.state, now, bookmark, self.interval_s):
+        bookmark_now = self.bookmark_fn()
+        if not decide_tick(self.state, now, bookmark_now, self.interval_s):
             return False
 
         # Fire.
-        prev_bookmark = self.state.last_tick_bookmark
-        self.state = mark_tick_started(self.state, now, bookmark)
+        bookmark_prev = self.state.last_tick_bookmark
+        self.state = mark_tick_started(self.state, now, bookmark_now)
         self._tick_counter += 1
         tick_id = f"t-{self._tick_counter:04d}"
 
         try:
             hunches = self.critic.tick(
                 tick_id=tick_id,
-                bookmark_prev=prev_bookmark,
-                bookmark_now=bookmark,
+                bookmark_prev=bookmark_prev,
+                bookmark_now=bookmark_now,
             )
         finally:
             self.state = mark_tick_finished(self.state)
 
         if self.on_tick_result is not None:
-            self.on_tick_result(hunches)
+            self.on_tick_result(hunches, bookmark_prev, bookmark_now)
         return True
 
     def run(self) -> None:

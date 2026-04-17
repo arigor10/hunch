@@ -21,6 +21,8 @@ def _emit(writer: HunchesWriter, smell: str, description: str = "") -> str:
         hunch_id=hid,
         ts="2026-04-14T12:00:00Z",
         emitted_by_tick=1,
+        bookmark_prev=0,
+        bookmark_now=1,
     )
     return hid
 

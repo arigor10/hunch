@@ -86,6 +86,9 @@ def hunch_emit_record(
     hunch_id: str,
     ts: str,
     emitted_by_tick: int,
+    *,
+    bookmark_prev: int,
+    bookmark_now: int,
 ) -> dict[str, Any]:
     """Format a Hunch as a `hunches.jsonl` emit event.
 
@@ -93,12 +96,28 @@ def hunch_emit_record(
     strictly append-only; this helper produces the `"type": "emit"`
     variant. Status-change events are written separately (by the
     surface / hook / framework) and have their own shape.
+
+    `bookmark_prev`/`bookmark_now` are the replay-buffer tick_seq
+    window — the same pair passed to `Critic.tick()`. Offline
+    evaluators (novelty judge, duplicate detector, etc.) use these
+    to pull the exact dialogue context the Critic "saw" without
+    re-running the trigger. Kw-only to keep the three trailing int
+    args (`emitted_by_tick`, `bookmark_prev`, `bookmark_now`) from
+    silently swapping at the call site.
     """
+    if bookmark_now < bookmark_prev:
+        raise ValueError(
+            f"bookmark_now={bookmark_now} < bookmark_prev={bookmark_prev}; "
+            "replay-buffer tick_seq is strictly monotonic, so a tick window "
+            "can never shrink. This is a framework wiring bug."
+        )
     return {
         "type": "emit",
         "hunch_id": hunch_id,
         "ts": ts,
         "emitted_by_tick": emitted_by_tick,
+        "bookmark_prev": bookmark_prev,
+        "bookmark_now": bookmark_now,
         "smell": hunch.smell,
         "description": hunch.description,
         "triggering_refs": hunch.triggering_refs.to_dict(),

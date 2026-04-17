@@ -189,7 +189,12 @@ class Runner:
     # Internals
     # ------------------------------------------------------------------
 
-    def _on_tick_result(self, hunches: list[Any]) -> None:
+    def _on_tick_result(
+        self,
+        hunches: list[Any],
+        bookmark_prev: int,
+        bookmark_now: int,
+    ) -> None:
         self._tick_counter += 1
         ts = _utc_now_iso()
         if self.log is not None:
@@ -203,6 +208,8 @@ class Runner:
                 hunch_id=hid,
                 ts=ts,
                 emitted_by_tick=self._tick_counter,
+                bookmark_prev=bookmark_prev,
+                bookmark_now=bookmark_now,
             )
             if self.log is not None:
                 smell = getattr(hunch, "smell", "<no smell>")
