@@ -540,9 +540,12 @@ def test_purge_uses_observed_event_tokens_when_available():
     dropped = s.purge()
     # Heavily over budget → substantial chunk trimmed.
     assert dropped > 20
-    # Post-purge synthesized observation stays near the low watermark.
+    # Post-purge synthesized observation stays near the low watermark
+    # plus the system overhead (which is large here because the high
+    # observation on a tiny prompt creates a big overhead estimate).
     assert s._observed_prefix_tokens is not None
-    assert s._observed_prefix_tokens <= s.low_watermark + 50
+    overhead = int(s._system_overhead_tokens or 0)
+    assert s._observed_prefix_tokens <= s.low_watermark + overhead + 50
 
 
 def test_purge_preserves_event_tokens_for_kept_events():
@@ -558,6 +561,63 @@ def test_purge_preserves_event_tokens_for_kept_events():
     assert sum(s._event_tokens) <= sum_before
     # ... and meaningful (we kept some observed events).
     assert sum(s._event_tokens) > 0
+
+
+# ---------------------------------------------------------------------------
+# System overhead tracking
+# ---------------------------------------------------------------------------
+
+def test_system_overhead_is_set_on_first_observation():
+    s = CriticPromptStream(preamble="P" * 100, chars_per_token=3.5)
+    s.append_chunk_text(1, "user", "hello " * 20)
+    assert s._system_overhead_tokens is None
+    # Simulate observation with overhead: the model sees 500 tokens but
+    # our render is only ~230 chars → ~66 tokens at cpt=3.5.
+    # Overhead ≈ 500 - 230/3.5 ≈ 434
+    s.update_observed_tokens(500)
+    assert s._system_overhead_tokens is not None
+    assert s._system_overhead_tokens > 0
+
+
+def test_system_overhead_ema_smooths_across_observations():
+    s = CriticPromptStream(preamble="P" * 100, chars_per_token=3.5)
+    s.append_chunk_text(1, "user", "hello " * 20)
+    s.update_observed_tokens(500)
+    first = s._system_overhead_tokens
+
+    s.append_chunk_text(2, "user", "world " * 30)
+    s.update_observed_tokens(700)
+    second = s._system_overhead_tokens
+
+    # EMA should have moved from the first value.
+    assert second != first
+
+
+def test_overhead_improves_purge_synthesis():
+    """Post-purge projected_tokens is closer to the real observation
+    when overhead is tracked vs when it isn't."""
+    s = CriticPromptStream(
+        preamble="P" * 500,
+        low_watermark=2000,
+        high_watermark=3000,
+        chars_per_token=3.5,
+    )
+    for i in range(100):
+        s.append_chunk_text(i, "user", "x" * 40)
+    # Simulate a model observation with significant overhead (~500 tok).
+    s.update_observed_tokens(5000)
+    assert s._system_overhead_tokens is not None
+    overhead = s._system_overhead_tokens
+
+    s.purge()
+    synth = s._observed_prefix_tokens
+
+    # The synthesis should include the overhead — it should be at least
+    # low_watermark-level (the overhead alone pushes it above the
+    # char-only estimate).
+    assert synth > s.low_watermark - 100  # not drastically below target
+    # And not wildly above.
+    assert synth < s.low_watermark + overhead + 200
 
 
 # ---------------------------------------------------------------------------

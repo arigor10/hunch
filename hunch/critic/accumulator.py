@@ -288,6 +288,12 @@ class CriticPromptStream:
     # `len(self.render())` at the most recent `update_observed_tokens`
     # call, used to compute the char-delta for the next ratio update.
     _prev_rendered_chars: int | None = field(default=None, repr=False)
+    # Estimated token overhead from the model provider's system prompt
+    # (e.g. `claude --print` injects ~12-14k tokens not in our rendered
+    # chars). Computed as `obs - rendered_chars / empirical_cpt` and
+    # EMA-smoothed. Used in `_estimate_fixed_region_tokens()` so the
+    # post-purge synthesis preserves the overhead instead of losing it.
+    _system_overhead_tokens: float | None = field(default=None, repr=False)
 
     # ------------------------------------------------------------------
     # Append API
@@ -411,7 +417,15 @@ class CriticPromptStream:
     def _estimate_fixed_region_tokens(self) -> int:
         """Estimate tokens in the non-timeline regions of the current
         rendered prompt (preamble + surviving hunches + living artifacts
-        + section headers + optional suffix)."""
+        + section headers + optional suffix), plus any system overhead
+        from the model provider.
+
+        The overhead (e.g. ~12-14k tokens from ``claude --print``'s
+        system prompt) is tracked empirically and included here so that
+        it's preserved through purge synthesis — without it the post-
+        purge ``projected_tokens()`` underestimates by the overhead
+        amount, causing purges to trigger too late.
+        """
         fixed_chars = (
             len(self.preamble)
             + len(_render_surviving_hunches_block(self.surviving_hunches))
@@ -420,7 +434,8 @@ class CriticPromptStream:
         )
         if self.suffix:
             fixed_chars += len(self.suffix) + 2
-        return _estimate_tokens(" " * fixed_chars, self._effective_chars_per_token())
+        base = _estimate_tokens(" " * fixed_chars, self._effective_chars_per_token())
+        return base + int(self._system_overhead_tokens or 0)
 
     def update_observed_tokens(self, input_tokens: int) -> None:
         """Record the model-reported prefix size after a successful call.
@@ -454,6 +469,22 @@ class CriticPromptStream:
                         0.3 * empirical + 0.7 * self._empirical_chars_per_token
                     )
         self._prev_rendered_chars = rendered_chars
+
+        # Update system overhead estimate: the gap between observed
+        # tokens and what our rendered chars would predict at the
+        # empirical ratio. This captures the model provider's system
+        # prompt (~12-14k tokens for `claude --print`) plus any
+        # systematic tokenization-rate differences between our content
+        # types. EMA-smoothed to reduce noise.
+        cpt = self._effective_chars_per_token()
+        if cpt > 0 and rendered_chars > 0:
+            current_overhead = input_tokens - (rendered_chars / cpt)
+            if self._system_overhead_tokens is None:
+                self._system_overhead_tokens = current_overhead
+            else:
+                self._system_overhead_tokens = (
+                    0.3 * current_overhead + 0.7 * self._system_overhead_tokens
+                )
 
         # Re-attribute the timeline-portion tokens across events by
         # character weight. After this, `sum(_event_tokens)` tracks the
@@ -526,7 +557,10 @@ class CriticPromptStream:
         )
         if self.suffix:
             fixed_chars += len(self.suffix) + 2
-        fixed_tokens = _estimate_tokens(" " * fixed_chars, cpt)
+        fixed_tokens = (
+            _estimate_tokens(" " * fixed_chars, cpt)
+            + int(self._system_overhead_tokens or 0)
+        )
 
         target_timeline_tokens = max(0, self.low_watermark - fixed_tokens)
 
