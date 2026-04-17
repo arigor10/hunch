@@ -128,6 +128,44 @@ def _build_parser() -> argparse.ArgumentParser:
         help="seconds between replay-buffer refreshes (default: 1)",
     )
 
+    rpo = sub.add_parser(
+        "replay-offline",
+        help="drive the Critic offline from a historical Claude transcript",
+    )
+    rpo.add_argument(
+        "--claude-log",
+        type=Path,
+        required=True,
+        help="path to a Claude Code .jsonl transcript",
+    )
+    rpo.add_argument(
+        "--replay-dir",
+        type=Path,
+        required=True,
+        help="output directory: conversation.jsonl, artifacts/, hunches.jsonl",
+    )
+    rpo.add_argument(
+        "--critic",
+        choices=("stub", "sonnet"),
+        default="stub",
+        help="critic implementation (default: stub)",
+    )
+    rpo.add_argument("--silence-s", type=float, default=30.0)
+    rpo.add_argument("--min-debounce-s", type=float, default=300.0)
+    rpo.add_argument("--max-interval-s", type=float, default=600.0)
+    rpo.add_argument(
+        "--max-events",
+        type=int,
+        default=None,
+        help="cap on events consumed (default: all)",
+    )
+    rpo.add_argument(
+        "--allow-existing",
+        action="store_true",
+        help="append to an existing replay_dir instead of refusing; use "
+        "only for resumption — will produce duplicate events otherwise",
+    )
+
     hook = sub.add_parser("hook", help="Claude Code hook handlers (internal)")
     hook_sub = hook.add_subparsers(dest="hook_name", metavar="<hook>")
     ups = hook_sub.add_parser(
@@ -185,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
     ns = parser.parse_args(argv)
     if ns.command == "run":
         return _cmd_run(ns)
+    if ns.command == "replay-offline":
+        return _cmd_replay_offline(ns)
     if ns.command == "hook":
         return _cmd_hook(ns)
     if ns.command == "list":
@@ -222,6 +262,48 @@ def _cmd_init(ns: argparse.Namespace) -> int:
     sys.stdout.write(f"hunch init: {cwd}\n")
     for line in result.as_lines(replay_dir, settings_path):
         sys.stdout.write(line + "\n")
+    return 0
+
+
+def _cmd_replay_offline(ns: argparse.Namespace) -> int:
+    from hunch.replay import run_replay_from_claude_log
+    from hunch.trigger import TriggerV1Config
+
+    def _log(msg: str) -> None:
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+
+    critic_factory = _resolve_critic_factory(ns.critic, _log)
+    critic = critic_factory()
+    trigger_cfg = TriggerV1Config(
+        silence_s=ns.silence_s,
+        min_debounce_s=ns.min_debounce_s,
+        max_interval_s=ns.max_interval_s,
+    )
+    _log(
+        f"hunch replay-offline: log={ns.claude_log} → {ns.replay_dir}"
+        f"  critic={ns.critic}  silence={ns.silence_s}s"
+        f" debounce={ns.min_debounce_s}s max={ns.max_interval_s}s"
+    )
+    try:
+        result = run_replay_from_claude_log(
+            claude_log=ns.claude_log,
+            replay_dir=ns.replay_dir,
+            critic=critic,
+            trigger_config=trigger_cfg,
+            on_log=_log,
+            max_events=ns.max_events,
+            allow_existing=ns.allow_existing,
+        )
+    except RuntimeError as e:
+        sys.stderr.write(f"hunch replay-offline: {e}\n")
+        return 1
+    _log(
+        f"[replay] done: events={result.events_consumed} "
+        f"ticks={result.ticks_fired} (virtual={result.virtual_ticks_fired}) "
+        f"hunches={result.hunches_emitted} "
+        f"backward_ts={result.backward_ts_warnings}"
+    )
     return 0
 
 
