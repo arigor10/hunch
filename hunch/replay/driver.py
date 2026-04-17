@@ -24,6 +24,7 @@ from hunch.capture.writer import ReplayBufferWriter
 from hunch.critic.protocol import Critic, Hunch
 from hunch.journal.hunches import HunchesWriter
 from hunch.parse.transcript import Event, parse_whole_file
+from hunch.replay.loader import load_trigger_events
 from hunch.trigger import (
     TriggerV1Config,
     TriggerV1State,
@@ -138,63 +139,24 @@ def run_replay(
                 break
             etype = event.get("type", "")
             ts_raw = event.get("timestamp", "")
-            parsed_ts = _parse_ts(ts_raw)
-            if parsed_ts is None:
-                # Keep sim_now monotone; fall back to the previous value.
-                sim_now = last_sim_now
-            elif parsed_ts < last_sim_now:
-                # Non-monotonic — clamp to last_sim_now to avoid negative
-                # deltas in trigger math. Rare but documented in
-                # unified_replay_mode.md §Resolved design points #2.
-                result.backward_ts_warnings += 1
-                log(
-                    f"[replay] warning: event {i} ts {ts_raw!r} is before "
-                    f"sim_now={last_sim_now}; clamping"
-                )
-                sim_now = last_sim_now
-            else:
-                sim_now = parsed_ts
-
-            # Inject virtual ticks in the gap (last_sim_now, sim_now] — moments
-            # when the live loop would have fired on silence or max_interval
-            # even though no event arrived. Without this the offline cadence
-            # drifts from live whenever long idle gaps fall between events.
             bookmark_pre_event = writer.tick_seq
-            while True:
-                vt = _next_virtual_tick_time(
-                    state, last_sim_now, sim_now, bookmark_pre_event, cfg,
-                )
-                if vt is None:
-                    break
-                state = _fire_tick(
-                    ctx=ctx,
-                    state=state,
-                    now=vt,
-                    current_bookmark=bookmark_pre_event,
-                    event_index=i,
-                    ts_raw_for_record="",
-                    is_virtual=True,
-                )
-                last_sim_now = vt
 
-            last_sim_now = sim_now
-
+            # Write first so that current_bookmark reflects the event
+            # that's about to be considered for triggering.
             writer.append_events([event], project_roots)
             current_bookmark = writer.tick_seq
-            result.events_consumed += 1
 
-            if decide_tick_v1(state, sim_now, current_bookmark, etype, cfg):
-                state = _fire_tick(
-                    ctx=ctx,
-                    state=state,
-                    now=sim_now,
-                    current_bookmark=current_bookmark,
-                    event_index=i,
-                    ts_raw_for_record=ts_raw,
-                    is_virtual=False,
-                )
-
-            state = observe_event_v1(state, etype, sim_now)
+            state, last_sim_now = _drive_one_event(
+                ctx=ctx,
+                state=state,
+                cfg=cfg,
+                event_index=i,
+                etype=etype,
+                ts_raw=ts_raw,
+                bookmark_pre_event=bookmark_pre_event,
+                current_bookmark=current_bookmark,
+                last_sim_now=last_sim_now,
+            )
     finally:
         critic.shutdown()
 
@@ -202,7 +164,7 @@ def run_replay(
 
 
 # ---------------------------------------------------------------------------
-# Convenience wrapper: from a Claude log
+# Convenience wrapper: from a Claude log (parse + drive in one go)
 # ---------------------------------------------------------------------------
 
 def run_replay_from_claude_log(
@@ -231,6 +193,95 @@ def run_replay_from_claude_log(
 
 
 # ---------------------------------------------------------------------------
+# Drive from an already-populated replay dir (no re-parse, no re-write)
+# ---------------------------------------------------------------------------
+
+def run_replay_from_dir(
+    replay_dir: Path,
+    critic: Critic,
+    trigger_config: TriggerV1Config | None = None,
+    critic_config: dict[str, Any] | None = None,
+    on_log: Callable[[str], None] | None = None,
+    max_events: int | None = None,
+    overwrite_hunches: bool = False,
+) -> ReplayResult:
+    """Drive a Critic over an already-populated replay buffer.
+
+    Read-only on conversation.jsonl / artifacts.jsonl / artifacts/. The
+    replay buffer is whatever the live framework (or a one-shot parser
+    like `scripts/parse_transcript.py`) produced — the driver here only
+    reads it and appends hunches.jsonl alongside.
+
+    Args:
+      replay_dir: an existing `.hunch/replay/`-style directory.
+      critic: any `Critic` protocol implementation.
+      trigger_config: v1 trigger knobs. Default = production cadence.
+      critic_config: extra config passed to `critic.init()`. `replay_dir`
+        is always injected automatically.
+      on_log: optional log sink; called once per tick / warning.
+      max_events: cap on events consumed (for smoke tests / partial runs).
+      overwrite_hunches: if True, delete any existing hunches.jsonl before
+        starting. Default False — refuses if a populated hunches.jsonl is
+        already present, so a bad re-run doesn't silently duplicate.
+
+    Returns a `ReplayResult` summarizing the run.
+    """
+    cfg = trigger_config or TriggerV1Config()
+    replay_dir = Path(replay_dir)
+
+    trigger_events = load_trigger_events(replay_dir)
+
+    hunches_path = replay_dir / "hunches.jsonl"
+    if hunches_path.exists() and hunches_path.stat().st_size > 0:
+        if overwrite_hunches:
+            hunches_path.unlink()
+        else:
+            raise RuntimeError(
+                f"{hunches_path} already exists and is non-empty; "
+                "pass overwrite_hunches=True to replace it."
+            )
+
+    hunches_writer = HunchesWriter(hunches_path=hunches_path)
+    init_config = {"replay_dir": str(replay_dir), **(critic_config or {})}
+    critic.init(init_config)
+
+    state = TriggerV1State()
+    result = ReplayResult()
+    ctx = _Ctx(
+        tick_counter=0,
+        critic=critic,
+        hunches_writer=hunches_writer,
+        result=result,
+        on_log=on_log,
+    )
+    last_sim_now = 0.0
+    # Bookmarks are already assigned in conversation.jsonl's `tick_seq`;
+    # the bookmark before the very first event is 0.
+    bookmark_pre_event = 0
+
+    try:
+        for i, te in enumerate(trigger_events):
+            if max_events is not None and i >= max_events:
+                break
+            state, last_sim_now = _drive_one_event(
+                ctx=ctx,
+                state=state,
+                cfg=cfg,
+                event_index=i,
+                etype=te.type,
+                ts_raw=te.timestamp,
+                bookmark_pre_event=bookmark_pre_event,
+                current_bookmark=te.tick_seq,
+                last_sim_now=last_sim_now,
+            )
+            bookmark_pre_event = te.tick_seq
+    finally:
+        critic.shutdown()
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -242,6 +293,81 @@ class _Ctx:
     hunches_writer: HunchesWriter
     result: ReplayResult
     on_log: Callable[[str], None] | None
+
+
+def _drive_one_event(
+    ctx: _Ctx,
+    state: TriggerV1State,
+    cfg: TriggerV1Config,
+    event_index: int,
+    etype: str,
+    ts_raw: str,
+    bookmark_pre_event: int,
+    current_bookmark: int,
+    last_sim_now: float,
+) -> tuple[TriggerV1State, float]:
+    """Process one event: clamp sim_now, inject virtual ticks into the gap,
+    evaluate the event-driven trigger, and observe it into state.
+
+    Shared between `run_replay` (events-in, writer-backed) and
+    `run_replay_from_dir` (loaded-from-replay-dir, read-only). Both
+    callers are expected to have already assigned `current_bookmark`
+    (via writer.tick_seq++ or by reading the loaded event's tick_seq).
+    """
+    parsed_ts = _parse_ts(ts_raw)
+    if parsed_ts is None:
+        # Keep sim_now monotone; fall back to the previous value.
+        sim_now = last_sim_now
+    elif parsed_ts < last_sim_now:
+        # Non-monotonic — clamp to last_sim_now to avoid negative
+        # deltas in trigger math.
+        ctx.result.backward_ts_warnings += 1
+        if ctx.on_log is not None:
+            ctx.on_log(
+                f"[replay] warning: event {event_index} ts {ts_raw!r} is "
+                f"before sim_now={last_sim_now}; clamping"
+            )
+        sim_now = last_sim_now
+    else:
+        sim_now = parsed_ts
+
+    # Inject virtual ticks in the gap (last_sim_now, sim_now] — moments
+    # when the live loop would have fired on silence or max_interval
+    # even though no event arrived. Without this the offline cadence
+    # drifts from live whenever long idle gaps fall between events.
+    while True:
+        vt = _next_virtual_tick_time(
+            state, last_sim_now, sim_now, bookmark_pre_event, cfg,
+        )
+        if vt is None:
+            break
+        state = _fire_tick(
+            ctx=ctx,
+            state=state,
+            now=vt,
+            current_bookmark=bookmark_pre_event,
+            event_index=event_index,
+            ts_raw_for_record="",
+            is_virtual=True,
+        )
+        last_sim_now = vt
+
+    last_sim_now = sim_now
+    ctx.result.events_consumed += 1
+
+    if decide_tick_v1(state, sim_now, current_bookmark, etype, cfg):
+        state = _fire_tick(
+            ctx=ctx,
+            state=state,
+            now=sim_now,
+            current_bookmark=current_bookmark,
+            event_index=event_index,
+            ts_raw_for_record=ts_raw,
+            is_virtual=False,
+        )
+
+    state = observe_event_v1(state, etype, sim_now)
+    return state, last_sim_now
 
 
 def _fire_tick(

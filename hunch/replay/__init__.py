@@ -11,10 +11,15 @@ from hunch.replay.driver import (
     ReplayResult,
     run_replay,
     run_replay_from_claude_log,
+    run_replay_from_dir,
 )
+from hunch.replay.loader import TriggerEvent, load_trigger_events
 
 __all__ = [
     "ReplayResult",
+    "TriggerEvent",
+    "load_trigger_events",
     "run_replay",
     "run_replay_from_claude_log",
+    "run_replay_from_dir",
 ]

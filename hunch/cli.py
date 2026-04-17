@@ -130,19 +130,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
     rpo = sub.add_parser(
         "replay-offline",
-        help="drive the Critic offline from a historical Claude transcript",
-    )
-    rpo.add_argument(
-        "--claude-log",
-        type=Path,
-        required=True,
-        help="path to a Claude Code .jsonl transcript",
+        help="drive the Critic offline over a parsed replay dir (or parse one "
+        "on the fly from a Claude log)",
     )
     rpo.add_argument(
         "--replay-dir",
         type=Path,
         required=True,
-        help="output directory: conversation.jsonl, artifacts/, hunches.jsonl",
+        help="replay-buffer dir (conversation.jsonl, artifacts/, hunches.jsonl)",
+    )
+    rpo.add_argument(
+        "--claude-log",
+        type=Path,
+        default=None,
+        help="optional raw Claude .jsonl to parse into --replay-dir before "
+        "running the critic. If omitted, --replay-dir must already be "
+        "populated (via `hunch run` or `scripts/parse_transcript.py`).",
     )
     rpo.add_argument(
         "--critic",
@@ -162,8 +165,14 @@ def _build_parser() -> argparse.ArgumentParser:
     rpo.add_argument(
         "--allow-existing",
         action="store_true",
-        help="append to an existing replay_dir instead of refusing; use "
-        "only for resumption — will produce duplicate events otherwise",
+        help="(with --claude-log) append to an existing replay_dir instead "
+        "of refusing; use only for resumption — will duplicate events",
+    )
+    rpo.add_argument(
+        "--overwrite-hunches",
+        action="store_true",
+        help="(without --claude-log) delete existing hunches.jsonl before "
+        "the run. Default: refuse if hunches.jsonl is non-empty.",
     )
 
     hook = sub.add_parser("hook", help="Claude Code hook handlers (internal)")
@@ -266,7 +275,10 @@ def _cmd_init(ns: argparse.Namespace) -> int:
 
 
 def _cmd_replay_offline(ns: argparse.Namespace) -> int:
-    from hunch.replay import run_replay_from_claude_log
+    from hunch.replay import (
+        run_replay_from_claude_log,
+        run_replay_from_dir,
+    )
     from hunch.trigger import TriggerV1Config
 
     def _log(msg: str) -> None:
@@ -280,22 +292,38 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
         min_debounce_s=ns.min_debounce_s,
         max_interval_s=ns.max_interval_s,
     )
-    _log(
-        f"hunch replay-offline: log={ns.claude_log} → {ns.replay_dir}"
-        f"  critic={ns.critic}  silence={ns.silence_s}s"
-        f" debounce={ns.min_debounce_s}s max={ns.max_interval_s}s"
-    )
     try:
-        result = run_replay_from_claude_log(
-            claude_log=ns.claude_log,
-            replay_dir=ns.replay_dir,
-            critic=critic,
-            trigger_config=trigger_cfg,
-            on_log=_log,
-            max_events=ns.max_events,
-            allow_existing=ns.allow_existing,
-        )
-    except RuntimeError as e:
+        if ns.claude_log is not None:
+            _log(
+                f"hunch replay-offline: parse {ns.claude_log} → "
+                f"{ns.replay_dir}  critic={ns.critic}"
+                f"  silence={ns.silence_s}s debounce={ns.min_debounce_s}s"
+                f" max={ns.max_interval_s}s"
+            )
+            result = run_replay_from_claude_log(
+                claude_log=ns.claude_log,
+                replay_dir=ns.replay_dir,
+                critic=critic,
+                trigger_config=trigger_cfg,
+                on_log=_log,
+                max_events=ns.max_events,
+                allow_existing=ns.allow_existing,
+            )
+        else:
+            _log(
+                f"hunch replay-offline: from-dir {ns.replay_dir}"
+                f"  critic={ns.critic}  silence={ns.silence_s}s"
+                f" debounce={ns.min_debounce_s}s max={ns.max_interval_s}s"
+            )
+            result = run_replay_from_dir(
+                replay_dir=ns.replay_dir,
+                critic=critic,
+                trigger_config=trigger_cfg,
+                on_log=_log,
+                max_events=ns.max_events,
+                overwrite_hunches=ns.overwrite_hunches,
+            )
+    except (RuntimeError, FileNotFoundError) as e:
         sys.stderr.write(f"hunch replay-offline: {e}\n")
         return 1
     _log(
