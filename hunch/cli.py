@@ -61,10 +61,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--critic",
-        choices=("stub", "sonnet"),
+        choices=("stub", "sonnet", "sonnet-v0", "sonnet-dry"),
         default="stub",
-        help="critic implementation (default: stub — emits nothing; "
-        "sonnet calls Anthropic API, requires ANTHROPIC_API_KEY)",
+        help="critic implementation (default: stub — emits nothing). "
+        "sonnet = accumulating v0.1 (shells out to `claude --print`). "
+        "sonnet-dry = v0.1 with no model call (logs prompt sizes only). "
+        "sonnet-v0 = legacy stateless critic; kept for compatibility, "
+        "do not use for new evaluation.",
     )
 
     ini = sub.add_parser(
@@ -149,9 +152,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     rpo.add_argument(
         "--critic",
-        choices=("stub", "sonnet"),
+        choices=("stub", "sonnet", "sonnet-v0", "sonnet-dry"),
         default="stub",
-        help="critic implementation (default: stub)",
+        help="critic implementation (default: stub). "
+        "sonnet = accumulating v0.1. sonnet-dry = v0.1 with no model "
+        "call. sonnet-v0 = legacy stateless (deprecated).",
     )
     rpo.add_argument("--silence-s", type=float, default=30.0)
     rpo.add_argument("--min-debounce-s", type=float, default=300.0)
@@ -173,6 +178,39 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="(without --claude-log) delete existing hunches.jsonl before "
         "the run. Default: refuse if hunches.jsonl is non-empty.",
+    )
+
+    aweb = sub.add_parser(
+        "annotate-web",
+        help="browser-based annotation UI (local Flask server)",
+    )
+    aweb.add_argument(
+        "--replay-dir",
+        type=Path,
+        required=True,
+        help="replay-buffer directory (conversation.jsonl)",
+    )
+    aweb.add_argument(
+        "--run-dir",
+        type=Path,
+        required=True,
+        help="critic run directory (hunches.jsonl, labels.jsonl)",
+    )
+    aweb.add_argument(
+        "--novel-only",
+        action="store_true",
+        help="only show novel hunches (requires novelty_summary.json in run-dir)",
+    )
+    aweb.add_argument(
+        "--dedup",
+        action="store_true",
+        help="exclude duplicate hunches (requires dedup/dedup_summary.json in run-dir)",
+    )
+    aweb.add_argument(
+        "--port",
+        type=int,
+        default=5555,
+        help="port for the local server (default: 5555)",
     )
 
     hook = sub.add_parser("hook", help="Claude Code hook handlers (internal)")
@@ -242,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_label(ns)
     if ns.command == "panel":
         return _cmd_panel(ns)
+    if ns.command == "annotate-web":
+        return _cmd_annotate_web(ns)
     if ns.command == "init":
         return _cmd_init(ns)
     if ns.command == "status":
@@ -341,8 +381,19 @@ def _resolve_critic_factory(name: str, log):
         from hunch.critic.stub import StubCritic
         return StubCritic
     if name == "sonnet":
-        from hunch.critic.stateless_sonnet import SonnetCritic
+        from hunch.critic.sonnet import SonnetCritic, SonnetCriticConfig
         return lambda: SonnetCritic(log=log)
+    if name == "sonnet-dry":
+        from hunch.critic.sonnet import SonnetCritic, SonnetCriticConfig
+        return lambda: SonnetCritic(
+            config=SonnetCriticConfig(dry_run=True), log=log,
+        )
+    if name == "sonnet-v0":
+        # Legacy stateless critic. Kept for compatibility with older
+        # sims; the sliding 20-event window is NOT what we want for
+        # production evaluation. See docs/critic_v0.md.
+        from hunch.critic.stateless_sonnet import SonnetCritic as _V0
+        return lambda: _V0(log=log)
     raise ValueError(f"unknown --critic value: {name!r}")
 
 
@@ -424,6 +475,18 @@ def _cmd_panel(ns: argparse.Namespace) -> int:
     replay_dir = _resolved_replay_dir(ns.replay_dir)
     replay_dir.mkdir(parents=True, exist_ok=True)
     return panel_run(replay_dir=replay_dir, poll_s=ns.poll)
+
+
+def _cmd_annotate_web(ns: argparse.Namespace) -> int:
+    from hunch.annotate_web import run_server
+
+    return run_server(
+        replay_dir=ns.replay_dir,
+        run_dir=ns.run_dir,
+        novel_only=ns.novel_only,
+        dedup=ns.dedup,
+        port=ns.port,
+    )
 
 
 def _cmd_hook(ns: argparse.Namespace) -> int:
