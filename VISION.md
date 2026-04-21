@@ -145,10 +145,13 @@ We are building in public from the start, and deliberately so. Overindexing on a
 
 ## See also
 
-Companion documents (to be added as the project develops):
+Companion documents:
 
-- **Related work** — how Hunch relates to AI Scientist, Agent Laboratory, ARIA, AHCE, Interactive Task Learning, and other nearby projects.
-- **Design** — architecture and implementation details.
+- **[Critic Roadmap](docs/critic_roadmap.md)** — the three-generation plan for the Critic: v0 (single call), v1 (agentic with managed knowledge), v2 (self-improving through mentorship).
+- **[Framework v0](docs/framework_v0.md)** — architecture of the capture + trigger + critic loop.
+- **[Critic v0](docs/critic_v0.md)** — the minimal single-call Critic that ships first.
+- **[Critic v0.1](docs/critic_v0.1.md)** — the accumulating prompt stream design.
+- **Related work** — how Hunch relates to AI Scientist, Agent Laboratory, ARIA, AHCE, Interactive Task Learning, and other nearby projects. *(planned)*
 
 ---
 

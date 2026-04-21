@@ -1,6 +1,6 @@
-"""Accumulating Critic prompt stream (v1).
+"""Accumulating Critic prompt stream (v0.1).
 
-See `docs/critic_v1.md` for the full design note. Quick summary:
+See `docs/critic_v0.1.md` for the full design note. Quick summary:
 
 The Critic's prompt is laid out as four regions that always appear
 in this order in the rendered output:
