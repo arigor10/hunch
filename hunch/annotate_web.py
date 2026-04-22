@@ -57,7 +57,7 @@ def _validate_replay_dir(replay_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Data loading (shared with annotate.py)
+# Data loading
 # ---------------------------------------------------------------------------
 
 def _load_conversation(path: Path) -> list[dict]:
