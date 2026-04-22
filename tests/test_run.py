@@ -15,11 +15,23 @@ import pytest
 
 from hunch.critic.protocol import Hunch, TriggeringRefs
 from hunch.critic.stub import StubCritic
+from hunch.journal.append import append_json_line
 from hunch.run import (
     RunConfig,
     Runner,
     _project_dir_for_cwd,
     find_latest_transcript,
+)
+from hunch.trigger import TriggerV1Config
+
+
+# Zeroed-out trigger config for tests: fires on every claude_stopped
+# event (turn-end mode) with no debounce requirements.
+_TEST_TRIGGER = TriggerV1Config(
+    silence_s=0.0,
+    min_debounce_s=0.0,
+    max_interval_s=1e9,
+    fire_on_turn_end=True,
 )
 
 
@@ -54,13 +66,22 @@ def _text_record(uuid: str, text: str, role: str = "assistant") -> dict:
     }
 
 
+def _inject_claude_stopped(runner: Runner) -> None:
+    """Simulate the Stop hook: append a claude_stopped event to
+    conversation.jsonl with tick_seq one past the writer's current."""
+    tick_seq = runner.writer.tick_seq + 1
+    append_json_line(runner.writer.conversation_path, {
+        "tick_seq": tick_seq,
+        "type": "claude_stopped",
+        "timestamp": "2026-04-14T12:05:00Z",
+    })
+
+
 # ---------------------------------------------------------------------------
 # Transcript discovery
 # ---------------------------------------------------------------------------
 
 def test_project_dir_encoding():
-    # The `/` → `-` and `_` → `-` substitutions match Claude Code's
-    # on-disk convention for `~/.claude/projects/<cwd>/`.
     d = _project_dir_for_cwd(Path("/home/me/my_repo"))
     assert d.name == "-home-me-my-repo"
 
@@ -103,8 +124,8 @@ def test_runner_step_captures_events_to_replay_buffer(tmp_path):
         cwd=tmp_path,
         transcript_path=transcript,
         replay_dir=tmp_path / "replay",
-        interval_s=0.0,  # fire every step
         poll_s=0.0,
+        trigger_config=_TEST_TRIGGER,
     )
     runner = Runner(config=config)
     runner.step_once()
@@ -113,11 +134,14 @@ def test_runner_step_captures_events_to_replay_buffer(tmp_path):
     assert "hello" in conversation
 
 
-def test_runner_writes_hunches_when_critic_emits(tmp_path):
+def test_runner_fires_tick_on_claude_stopped(tmp_path):
+    """assistant text → Stop hook → step_once picks up claude_stopped
+    and fires the critic."""
     transcript = tmp_path / "transcript.jsonl"
-    _write_transcript(transcript, [_text_record("u1", "first")])
+    _write_transcript(transcript, [
+        _text_record("u1", "first", role="assistant"),
+    ])
 
-    # Critic that returns one hunch every tick.
     class FakeCritic(StubCritic):
         def tick(self, tick_id, bookmark_prev, bookmark_now):
             super().tick(tick_id, bookmark_prev, bookmark_now)
@@ -133,13 +157,18 @@ def test_runner_writes_hunches_when_critic_emits(tmp_path):
         cwd=tmp_path,
         transcript_path=transcript,
         replay_dir=tmp_path / "replay",
-        interval_s=0.0,
         poll_s=0.0,
         critic_factory=FakeCritic,
+        trigger_config=_TEST_TRIGGER,
     )
     runner = Runner(config=config)
-    runner.step_once()
+    runner.step_once()  # processes assistant text, no tick yet
+    assert runner._tick_counter == 0
 
+    _inject_claude_stopped(runner)
+    runner.step_once()  # picks up claude_stopped from conversation.jsonl
+
+    assert runner._tick_counter == 1
     hunches_path = tmp_path / "replay" / "hunches.jsonl"
     assert hunches_path.exists()
     lines = [L for L in hunches_path.read_text().splitlines() if L.strip()]
@@ -158,8 +187,8 @@ def test_runner_picks_up_appended_transcript_lines(tmp_path):
         cwd=tmp_path,
         transcript_path=transcript,
         replay_dir=tmp_path / "replay",
-        interval_s=0.0,
         poll_s=0.0,
+        trigger_config=_TEST_TRIGGER,
     )
     runner = Runner(config=config)
     runner.step_once()
@@ -174,23 +203,24 @@ def test_runner_picks_up_appended_transcript_lines(tmp_path):
     assert runner.writer.tick_seq > bookmark_after_first
 
 
-def test_runner_does_not_tick_when_no_new_events(tmp_path):
+def test_runner_does_not_tick_when_no_hook_events(tmp_path):
+    """Without a claude_stopped event, no ticks fire."""
     transcript = tmp_path / "transcript.jsonl"
-    _write_transcript(transcript, [_text_record("u1", "first")])
+    _write_transcript(transcript, [
+        _text_record("u1", "first", role="assistant"),
+    ])
 
     config = RunConfig(
         cwd=tmp_path,
         transcript_path=transcript,
         replay_dir=tmp_path / "replay",
-        interval_s=0.0,
         poll_s=0.0,
+        trigger_config=_TEST_TRIGGER,
     )
     runner = Runner(config=config)
-    runner.step_once()  # fires once — there's new content
-    first_tick_count = len(runner.critic.tick_log)
-
-    runner.step_once()  # nothing new → no tick
-    assert len(runner.critic.tick_log) == first_tick_count
+    runner.step_once()  # assistant text
+    runner.step_once()  # nothing new
+    assert runner._tick_counter == 0
 
 
 def test_runner_calls_critic_init_exactly_once(tmp_path):

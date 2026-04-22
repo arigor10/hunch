@@ -48,26 +48,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "(default: cwd; repeatable)",
     )
     run.add_argument(
-        "--interval",
-        type=float,
-        default=10.0,
-        help="minimum seconds between Critic ticks (default: 10)",
-    )
-    run.add_argument(
         "--poll",
         type=float,
         default=1.0,
         help="loop wake-up interval in seconds (default: 1)",
     )
     run.add_argument(
+        "--min-debounce-s",
+        type=float,
+        default=300.0,
+        help="trigger: min seconds between ticks (default: 300)",
+    )
+    run.add_argument(
         "--critic",
-        choices=("stub", "sonnet", "sonnet-v0", "sonnet-dry"),
+        choices=("stub", "sonnet", "sonnet-dry"),
         default="stub",
         help="critic implementation (default: stub — emits nothing). "
         "sonnet = accumulating v0.1 (shells out to `claude --print`). "
-        "sonnet-dry = v0.1 with no model call (logs prompt sizes only). "
-        "sonnet-v0 = legacy stateless critic; kept for compatibility, "
-        "do not use for new evaluation.",
+        "sonnet-dry = v0.1 with no model call (logs prompt sizes only).",
     )
 
     ini = sub.add_parser(
@@ -152,11 +150,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     rpo.add_argument(
         "--critic",
-        choices=("stub", "sonnet", "sonnet-v0", "sonnet-dry"),
+        choices=("stub", "sonnet", "sonnet-dry"),
         default="stub",
         help="critic implementation (default: stub). "
         "sonnet = accumulating v0.1. sonnet-dry = v0.1 with no model "
-        "call. sonnet-v0 = legacy stateless (deprecated).",
+        "call.",
     )
     rpo.add_argument("--silence-s", type=float, default=30.0)
     rpo.add_argument("--min-debounce-s", type=float, default=300.0)
@@ -225,6 +223,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="replay-buffer directory (default: .hunch/replay/ under cwd)",
     )
+    stop_hook = hook_sub.add_parser(
+        "stop",
+        help="Stop hook — append claude_stopped event to conversation.jsonl",
+    )
+    stop_hook.add_argument(
+        "--replay-dir",
+        type=Path,
+        default=None,
+        help="replay-buffer directory (default: .hunch/replay/ under cwd)",
+    )
 
     return p
 
@@ -233,6 +241,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     # Deferred import so `hunch --help` and `hunch --version` don't
     # pay for pulling in the framework loop and its dependencies.
     from hunch.run import RunConfig, Runner
+    from hunch.trigger import TriggerV1Config
 
     cwd = Path.cwd()
 
@@ -240,15 +249,21 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         sys.stdout.write(msg + "\n")
         sys.stdout.flush()
 
+    trigger_cfg = TriggerV1Config(
+        silence_s=ns.min_debounce_s,
+        min_debounce_s=ns.min_debounce_s,
+        fire_on_turn_end=True,
+    )
+
     critic_factory = _resolve_critic_factory(ns.critic, _log)
     config = RunConfig(
         cwd=cwd,
         transcript_path=ns.transcript,
         replay_dir=ns.replay_dir,
         project_roots=list(ns.project_roots or []),
-        interval_s=ns.interval,
         poll_s=ns.poll,
         critic_factory=critic_factory,
+        trigger_config=trigger_cfg,
     )
 
     try:
@@ -259,7 +274,8 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     _log(f"hunch run: following {runner.transcript_path}")
     _log(f"           replay={config.resolved_replay_dir()}")
     _log(f"           critic={type(runner.critic).__name__}")
-    _log(f"           interval={config.interval_s}s poll={config.poll_s}s")
+    _log(f"           trigger=claude-stopped (debounce={trigger_cfg.min_debounce_s}s)")
+    _log(f"           poll={config.poll_s}s")
     _log("Ctrl-C to stop.")
     runner.run_forever()
     return 0
@@ -388,12 +404,6 @@ def _resolve_critic_factory(name: str, log):
         return lambda: SonnetCritic(
             config=SonnetCriticConfig(dry_run=True), log=log,
         )
-    if name == "sonnet-v0":
-        # Legacy stateless critic. Kept for compatibility with older
-        # sims; the sliding 20-event window is NOT what we want for
-        # production evaluation. See docs/critic_v0.md.
-        from hunch.critic.stateless_sonnet import SonnetCritic as _V0
-        return lambda: _V0(log=log)
     raise ValueError(f"unknown --critic value: {name!r}")
 
 
@@ -496,6 +506,12 @@ def _cmd_hook(ns: argparse.Namespace) -> int:
         if ns.replay_dir is not None:
             argv.extend(["--replay-dir", str(ns.replay_dir)])
         return ups_main(argv)
+    if ns.hook_name == "stop":
+        from hunch.hook.stop import main as stop_main
+        argv = []
+        if ns.replay_dir is not None:
+            argv.extend(["--replay-dir", str(ns.replay_dir)])
+        return stop_main(argv)
     sys.stderr.write(f"hunch hook: unknown hook '{ns.hook_name}'\n")
     return 2
 

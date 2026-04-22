@@ -1,16 +1,20 @@
 """Framework main loop: capture → trigger → critic → journal.
 
-v0 wires the five pieces (parse, capture/writer, trigger, critic,
+Wires the five pieces (parse, capture/writer, trigger, critic,
 journal) together into the `hunch run` command. The loop is
 deliberately simple — a single thread, synchronous, one iteration per
 `poll_s`:
 
   1. Poll the active Claude Code transcript for new lines. Parse them
-     into events and append to the replay buffer.
-  2. Ask the Trigger whether it's time to fire a tick. If yes, call the
-     Critic, get a list of Hunches, write emit events to
-     `hunches.jsonl`. If no, continue.
+     into events.
+  2. For each new event, write it to the replay buffer, then evaluate
+     the TriggerV1 policy. If the trigger fires, call the Critic, get
+     Hunches, write emit events to `hunches.jsonl`.
   3. Sleep briefly, repeat until interrupted.
+
+Events are processed individually (not in batch) because TriggerV1 is
+event-driven — it needs each event's type to detect turn boundaries
+(user_text following assistant silence).
 
 This module only owns the *wiring*. It doesn't know how to parse
 transcripts (that's `parse/`), how to decide when to tick (`trigger`),
@@ -23,18 +27,28 @@ CLI in `hunch/cli.py` translates argv into a `RunConfig`.
 
 from __future__ import annotations
 
+import json
 import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from hunch.capture.writer import ReplayBufferWriter, poll_once
+from hunch.capture.writer import ReplayBufferWriter
 from hunch.critic import Critic
 from hunch.critic.stub import StubCritic
 from hunch.journal.hunches import HunchesWriter
 from hunch.parse import ParserState
-from hunch.trigger import TriggerLoop
+from hunch.parse.transcript import poll_new_events
+from hunch.trigger import (
+    FIRE_EXCLUSIVE,
+    TriggerV1Config,
+    TriggerV1State,
+    decide_tick_v1,
+    mark_tick_finished_v1,
+    mark_tick_started_v1,
+    observe_event_v1,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -88,14 +102,23 @@ class RunConfig:
     `critic_factory` lets callers inject a real Critic (Sonnet-backed,
     etc.) without changing this module. Default is `StubCritic` so
     the end-to-end pipeline can be exercised without an API key.
+
+    `trigger_config` controls when the Critic fires. Default is
+    turn-end mode (fire when the Scientist speaks after Claude silence).
     """
     cwd: Path
     transcript_path: Path | None = None
     replay_dir: Path | None = None
     project_roots: list[str] = field(default_factory=list)
-    interval_s: float = 10.0
     poll_s: float = 1.0
     critic_factory: Callable[[], Critic] = StubCritic
+    trigger_config: TriggerV1Config = field(
+        default_factory=lambda: TriggerV1Config(
+            silence_s=300.0,
+            min_debounce_s=300.0,
+            fire_on_turn_end=True,
+        )
+    )
 
     def resolved_replay_dir(self) -> Path:
         return self.replay_dir or (self.cwd / ".hunch" / "replay")
@@ -118,12 +141,13 @@ class Runner:
     writer: ReplayBufferWriter = field(init=False)
     hunches_writer: HunchesWriter = field(init=False)
     critic: Critic = field(init=False)
-    trigger_loop: TriggerLoop = field(init=False)
     parser_state: ParserState = field(init=False)
     transcript_path: Path = field(init=False)
+    trigger_state: TriggerV1State = field(init=False)
     log: Callable[[str], None] | None = None
     _stopped: bool = False
     _tick_counter: int = 0
+    _hook_bookmark: int = 0
 
     def __post_init__(self) -> None:
         cfg = self.config
@@ -146,28 +170,66 @@ class Runner:
         self.critic = cfg.critic_factory()
         self.critic.init({"replay_dir": str(replay_dir)})
 
-        self.trigger_loop = TriggerLoop(
-            critic=self.critic,
-            bookmark_fn=lambda: self.writer.tick_seq,
-            on_tick_result=self._on_tick_result,
-            interval_s=cfg.interval_s,
-            poll_s=cfg.poll_s,
-        )
+        self.trigger_state = TriggerV1State()
+        self._hook_bookmark = self.writer.tick_seq
 
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
     def step_once(self) -> None:
-        """One iteration: capture new events, maybe fire a tick."""
-        tick_seq_before = self.writer.tick_seq
-        self.parser_state = poll_once(
-            self.transcript_path, self.writer, self.parser_state
+        """One iteration: capture new events, evaluate trigger per event,
+        then check for hook-injected claude_stopped events."""
+        events, new_parser_state = poll_new_events(
+            self.transcript_path, self.parser_state,
         )
+        self.parser_state = new_parser_state
+
+        if not events:
+            self._check_hook_events()
+            return
+
+        project_roots = self.parser_state.project_roots
+        tick_seq_before = self.writer.tick_seq
+
+        for event in events:
+            etype = event.get("type", "")
+
+            # Write one event to the replay buffer.
+            self.writer.append_events([event], project_roots)
+            bookmark_now = self.writer.tick_seq
+
+            # Evaluate trigger with the current event's type.
+            now = time.monotonic()
+            fire = decide_tick_v1(
+                self.trigger_state,
+                now,
+                bookmark_now,
+                etype,
+                self.config.trigger_config,
+            )
+
+            if fire is not None:
+                effective_bookmark = bookmark_now
+                if (
+                    fire == FIRE_EXCLUSIVE
+                    and bookmark_now > self.trigger_state.last_tick_bookmark + 1
+                ):
+                    effective_bookmark = bookmark_now - 1
+                self._fire_tick(now, effective_bookmark)
+
+            self.trigger_state = observe_event_v1(
+                self.trigger_state, etype, now,
+            )
+
         delta = self.writer.tick_seq - tick_seq_before
         if delta > 0 and self.log is not None:
-            self.log(f"[capture] +{delta} events (tick_seq now {self.writer.tick_seq})")
-        self.trigger_loop.step()
+            self.log(
+                f"[capture] +{delta} events "
+                f"(tick_seq now {self.writer.tick_seq})"
+            )
+
+        self._check_hook_events()
 
     def run_forever(self) -> None:
         """Blocking loop until SIGINT/SIGTERM or `stop()`."""
@@ -183,23 +245,94 @@ class Runner:
 
     def stop(self) -> None:
         self._stopped = True
-        self.trigger_loop.stop()
+
+    # ------------------------------------------------------------------
+    # Hook-injected events
+    # ------------------------------------------------------------------
+
+    def _check_hook_events(self) -> None:
+        """Scan conversation.jsonl for claude_stopped events appended by
+        the Stop hook (tick_seq > writer.tick_seq).
+
+        The Stop hook writes directly to conversation.jsonl, bypassing
+        the writer. We detect these by reading tail lines with tick_seq
+        beyond what the writer has assigned.
+        """
+        conversation_path = self.writer.conversation_path
+        if not conversation_path.exists():
+            return
+
+        hook_events = _read_hook_events(
+            conversation_path, self._hook_bookmark,
+        )
+        if not hook_events:
+            return
+
+        for entry in hook_events:
+            tick_seq = entry["tick_seq"]
+            etype = entry["type"]
+            self._hook_bookmark = tick_seq
+
+            if etype != "claude_stopped":
+                continue
+
+            now = time.monotonic()
+            bookmark_now = tick_seq
+            fire = decide_tick_v1(
+                self.trigger_state,
+                now,
+                bookmark_now,
+                etype,
+                self.config.trigger_config,
+            )
+
+            if fire is not None:
+                self._fire_tick(now, bookmark_now)
+
+            self.trigger_state = observe_event_v1(
+                self.trigger_state, etype, now,
+            )
+
+        if self.log is not None:
+            self.log(
+                f"[hook] +{len(hook_events)} hook event(s) "
+                f"(hook_bookmark now {self._hook_bookmark})"
+            )
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _on_tick_result(
-        self,
-        hunches: list[Any],
-        bookmark_prev: int,
-        bookmark_now: int,
-    ) -> None:
+    def _fire_tick(self, now: float, bookmark_now: int) -> None:
+        bookmark_prev = self.trigger_state.last_tick_bookmark
+        self.trigger_state = mark_tick_started_v1(
+            self.trigger_state, now, bookmark_now,
+        )
         self._tick_counter += 1
+        tick_id = f"t-{self._tick_counter:04d}"
+
+        if self.log is not None:
+            self.log(
+                f"[tick {tick_id}] firing "
+                f"(window {bookmark_prev}..{bookmark_now})"
+            )
+
+        t0 = time.monotonic()
+        try:
+            hunches = self.critic.tick(
+                tick_id=tick_id,
+                bookmark_prev=bookmark_prev,
+                bookmark_now=bookmark_now,
+            )
+        finally:
+            self.trigger_state = mark_tick_finished_v1(self.trigger_state)
+
+        elapsed = time.monotonic() - t0
         ts = _utc_now_iso()
         if self.log is not None:
             self.log(
-                f"[tick t-{self._tick_counter:04d}] {len(hunches)} hunch(es) emitted"
+                f"[tick {tick_id}] {len(hunches)} hunch(es) emitted "
+                f"({elapsed:.1f}s)"
             )
         for hunch in hunches:
             hid = self.hunches_writer.allocate_id()
@@ -222,9 +355,43 @@ class Runner:
             try:
                 signal.signal(sig, _handler)
             except ValueError:
-                # Not on the main thread (e.g. under some test runners);
-                # graceful-shutdown responsibility shifts to the caller.
                 pass
+
+
+def _read_hook_events(
+    conversation_path: Path,
+    after_tick_seq: int,
+) -> list[dict]:
+    """Read entries from conversation.jsonl with tick_seq > after_tick_seq.
+
+    Only returns entries beyond what the runner has already processed.
+    Reads from the end of the file for efficiency.
+    """
+    results = []
+    try:
+        with open(conversation_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            chunk_size = min(8192, size)
+            if chunk_size == 0:
+                return []
+            f.seek(size - chunk_size)
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+
+    for line in tail.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            tick_seq = int(entry.get("tick_seq", 0))
+            if tick_seq > after_tick_seq:
+                results.append(entry)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+    return results
 
 
 def _utc_now_iso() -> str:
