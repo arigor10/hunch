@@ -43,7 +43,8 @@ Build the skeleton so that every component we ship is **additive toward** the lo
                                       │ ├─ artifacts.jsonl        │
   ┌────────────┐       tick           │ ├─ artifacts/             │
   │  Trigger   │ ──────────┐          │ ├─ hunches.jsonl          │
-  └────────────┘           ▼          │ └─ feedback.jsonl         │
+  └────────────┘           ▼          │ ├─ feedback.jsonl         │
+                                      │ └─ labels.jsonl           │
                     ┌────────────┐    └───────────────────────────┘
                     │  Critic    │        ▲           ▲
                     │  process   │ ───────┘ writes    │ reads/writes
@@ -72,9 +73,9 @@ These are the interface-level commitments we take to the bank. Everything in v0 
 1. **The replay buffer is the single source of truth for Critic input.** Anything the Critic reads must be in, or referenced from, `.hunch/replay/`. The Critic must never need to reach outside this directory for primary data.
 2. **The Critic is a process, not a function.** Launched by the framework via a configured command; communicates over stdio JSON (or a Unix socket). Stateful and stateless implementations both fit.
 3. **Each Critic tick carries `(full_snapshot_bookmark, delta_bookmark)`.** The Critic either re-reads full or reads only since-bookmark. The framework doesn't care which.
-4. **All replay-buffer JSONL files are strictly append-only.** This includes `hunches.jsonl`: a hunch's lifecycle (pending → shown_to_researcher → suppressed, etc.) is represented as a sequence of *status-change event* entries appended by whoever changes status. Current state is computed by folding events. No in-place mutation anywhere; every consumer (side panel, hook, future agentic Critic, future analytics) reads the same files and gets a full audit trail for free.
+4. **All replay-buffer JSONL files are strictly append-only.** This includes `hunches.jsonl`: a hunch's lifecycle (pending → surfaced → suppressed, etc.) is represented as a sequence of *status-change event* entries appended by whoever changes status. Current state is computed by folding events. No in-place mutation anywhere; every consumer (side panel, hook, future agentic Critic, future analytics) reads the same files and gets a full audit trail for free.
 5. **Surface is file-triggered, not call-triggered.** Anything that wants to display, inject, or react to a hunch reads `hunches.jsonl` and `feedback.jsonl`. This lets v0's side panel, v0.5's PreToolUse hook, and v1's Stop hook all coexist and all consume the same data.
-6. **Hunch → Researcher injection happens via `UserPromptSubmit` hook in v0**, but the hook is a thin reader over `hunches.jsonl`. Swapping to `PreToolUse`/`Stop` later changes *when* prepending fires, not *what* is prepended.
+6. **Two hooks wire the framework into Claude Code.** The `UserPromptSubmit` hook injects approved hunches into the Researcher's context. The `Stop` hook appends `claude_stopped` events to enable the trigger. Both are thin file readers/writers over the replay buffer. Swapping to `PreToolUse` or SDK injection later changes *when* prepending fires, not *what* is prepended.
 7. **Config is layered: required-interface < auto-discovery < `hunch init` scaffolding.** Zero-config usage must be possible for common layouts; opinionated scaffolding is optional.
 
 If we're ever tempted to violate one of these to save time in v0, stop and rethink — we're about to close a door.
@@ -101,7 +102,10 @@ If we're ever tempted to violate one of these to save time in v0, stop and rethi
 
 ### 2. Trigger
 
-**v0:** Time-based. Every N seconds (default 10s), the framework sends a tick to the Critic process if there are new replay entries since the last tick. Otherwise skip. If the Critic is still mid-tick when the next fire time arrives, skip (log a `skipped_busy` event).
+**Two modes implemented:**
+
+- **Classic (time-based).** Fire when Claude has been silent for `silence_s` (default 30s), subject to `min_debounce_s` between ticks and a `max_interval_s` forced fire for long monologues. If the Critic is still mid-tick when the next fire time arrives, skip. Used by the offline replay driver when `fire_on_turn_end=False`.
+- **Claude-stopped (turn-end).** Fire when a `claude_stopped` event appears in the replay buffer — appended by the `Stop` hook when Claude finishes a turn. The Critic fires immediately (within 1s poll) provided the debounce interval (default 300s) has elapsed since the last tick. This is the mode `hunch run` uses. It matches the meeting-room framing: the colleague raises a hand the moment the Researcher pauses, rather than waiting for the Scientist to speak. See `docs/trigger_policy_v1.md` for the analysis behind this mode. For offline replay, `claude_stopped` events are synthesized at speaker boundaries (assistant → user transitions) by `synthesize_claude_stopped()` in the replay loader.
 
 **Contract:**
 - Tick is a JSON message on the Critic's stdin: `{"tick_id", "bookmark_prev", "bookmark_now"}`.
@@ -109,13 +113,12 @@ If we're ever tempted to violate one of these to save time in v0, stop and rethi
 - Skip policy (`skip` vs `queue` vs `kill_and_restart`) is config.
 
 **Future extensions:**
-- Event-based triggering: fire on artifact writes, figure updates, long Researcher monologues, specific conversation patterns.
 - Critic self-triggering: agentic Critic runs continuously, emits hunches when *it* decides. Framework downgrades to notification-only.
 - Cadence-learning: trigger policy tunes itself based on hunch acceptance rates in different conversation phases.
 
 ### 3. Critic (interface only)
 
-The Critic is a black box behind its protocol. v0 will ship a stub implementation; its internals are specified separately (see `critic_v0.md` — to be written).
+The Critic is a black box behind its protocol. Its internals are specified separately in [`critic_v0.1.md`](critic_v0.1.md) (the accumulating design that ships as the production Critic).
 
 **Contract (the Critic protocol):**
 
@@ -148,12 +151,10 @@ shutdown:
 
 The Critic has read access to the entire `.hunch/replay/` directory. It pulls whatever subset of the replay buffer it wants per tick. Hunches are returned in the tick result **and** may be appended directly to `hunches.jsonl` by the Critic (both paths must be supported — the framework dedups by `hunch_id`).
 
-**v0 implementation (sketched, detailed in `critic_v0.md`):**
-- In-process Python wrapper around a Sonnet API call.
-- Reads the last N chunks + current artifact snapshots from replay buffer.
-- Uses a port of the offline v2 mining prompt.
-- Stateless; relies on `prior_hunches` in its own input to avoid repeats.
-- Anthropic prompt caching on the stable prefix.
+**Shipped implementations:**
+- **Stub** (`hunch.critic.stub`) — emits nothing; for testing the framework loop.
+- **Sonnet v0.1** (`hunch.critic.sonnet`) — accumulating Critic (see `critic_v0.1.md`). Builds a growing prompt with dialogue, artifacts, and prior hunches across ticks. Shells out to `claude --print`. Prompt caching on the stable prefix. Invoked as `--critic sonnet` in the CLI.
+- **Sonnet dry-run** (`hunch.critic.sonnet` with `dry_run=True`) — full pipeline without the model call. Logs prompt sizes per tick for cost estimation and debugging. Invoked as `--critic sonnet-dry` in the CLI.
 
 **Future extensions (doors left open):**
 - Long-running agentic Critic: `claude -r <session-id> -p "<tick message>"` per tick, or SDK-hosted agent. Maintains its own scratchpad tree of principles, updated as it goes. Identical protocol on the wire.
@@ -165,7 +166,7 @@ The Critic has read access to the entire `.hunch/replay/` directory. It pulls wh
 
 **v0:** A tmux layout with two panes:
 - **Main pane** runs `claude` (the Scientist's Researcher session).
-- **Side pane** runs `hunch watch`, a TUI that tails `hunches.jsonl`, renders each hunch with its id and smell description, and captures keyboard shortcuts.
+- **Side pane** runs `hunch panel`, a TUI that tails `hunches.jsonl`, renders each hunch with its id and smell description, and captures keyboard shortcuts.
 
 Keyboard shortcuts (tmux no-prefix bindings, delivered via `bind-key -n`):
 - `Alt-g` — mark latest unresolved hunch as *good*, will be prepended to Researcher on next natural turn.
@@ -175,20 +176,23 @@ Keyboard shortcuts (tmux no-prefix bindings, delivered via `bind-key -n`):
 
 All four keybindings can fire regardless of which pane has focus — the Scientist's cursor never leaves the main terminal.
 
-**Injection mechanism (v0):** A `UserPromptSubmit` hook configured in `~/.claude/settings.json` (or project-local settings) reads `hunches.jsonl`, finds entries with status `good-pending-inject` or (by default) `pending-shown`, formats them as a prefix block like:
+**Trigger delivery (v0):** A `Stop` hook configured in `.claude/settings.local.json` appends a `claude_stopped` event to `conversation.jsonl` when Claude finishes a turn. The `hunch run` loop detects this event and fires the Critic (subject to debounce). Hunches are written to `hunches.jsonl` as `pending`.
 
-```
-[Critic hunch, 2 min ago]
-<hunch text>
-[/Critic hunch]
-```
+**Approval gate (v0):** The Scientist reviews hunches in the side panel and labels them `good`, `bad`, or `skip`. Only hunches labeled `good` are injected into the Researcher's context — this ensures the Scientist triages hunches before they reach the Researcher, and encourages building the label bank.
 
-...and injects them as `additionalContext` ahead of the Scientist's message. The hook then marks those hunches as `shown_to_researcher` in `hunches.jsonl`.
+**Injection mechanism (v0):** A `UserPromptSubmit` hook (also in `.claude/settings.local.json`) reads `hunches.jsonl` and `feedback.jsonl`, finds entries whose folded status is `pending` AND whose latest explicit label in `feedback.jsonl` is `good`. It formats them as a `<hunch-injection>` block injected as `additionalContext` ahead of the Scientist's message, then marks those hunches as `surfaced` in `hunches.jsonl`.
 
 **Contract:**
 - Side panel reads `hunches.jsonl` (folding events to derive current status); writes to `feedback.jsonl` and appends status-change events to `hunches.jsonl` (e.g. `{type: "status_change", hunch_id, new_status: "suppressed", by: "scientist_key"}`).
-- UserPromptSubmit hook reads `hunches.jsonl`, prepends hunches whose folded status is pending-and-not-suppressed, and appends a status-change event (`new_status: "shown_to_researcher"`).
-- Neither the side panel nor the hook ever talks directly to the Critic — they only read/write files.
+- Stop hook appends `{"type": "claude_stopped", "tick_seq": N, "timestamp": ...}` to `conversation.jsonl` when Claude finishes a turn.
+- UserPromptSubmit hook reads `hunches.jsonl` + `feedback.jsonl`, prepends hunches that are pending AND labeled `good`, and appends a status-change event (`new_status: "surfaced"`).
+- Neither the side panel nor the hooks ever talk directly to the Critic — they only read/write files.
+
+**Additional CLI subcommands (beyond the side panel):**
+- `hunch list` — print current hunches with statuses (useful for scripting and quick inspection without launching the TUI).
+- `hunch label <hunch_id> good|bad|skip` — record an explicit label for a hunch from the command line. Writes to `feedback.jsonl` (same effect as the side-panel keybinding; the approval gate in the UserPromptSubmit hook reads this file).
+- `hunch replay-offline` — drive the Critic offline over a pre-parsed replay directory (or parse a raw Claude log on the fly). Used for evaluation, prompt iteration, and running the Critic against historical sessions.
+- `hunch annotate-web` — browser-based annotation UI (local Flask server) for reviewing hunches with full conversation context, artifact rendering, and figure display. Supports novelty and dedup filtering.
 
 **Future extensions (doors left open):**
 - **Mid-turn injection** via a `PreToolUse` or `PostToolUse` hook added alongside UserPromptSubmit. Same file, different trigger point.
@@ -200,21 +204,23 @@ All four keybindings can fire regardless of which pane has focus — the Scienti
 
 ### 5. Feedback
 
-**v0:** Dual-channel:
+**v0:** Explicit labels only:
 
-- **Explicit** — side-panel keys write to `feedback.jsonl`:
+- **Explicit** — side-panel keys or `hunch label` CLI write to `feedback.jsonl`:
   `{"hunch_id", "label": "good"|"bad"|"skip", "ts"}`.
-- **Implicit** — when the UserPromptSubmit hook prepends a hunch, it records in `feedback.jsonl`:
-  `{"hunch_id", "label": "implicit", "scientist_reply": <the prompt text>, "ts"}`.
 
-Both channels append. No deletion.
+Labels are append-only. No deletion. A hunch may accumulate multiple labels (e.g. relabeling from `skip` to `good`); last-write-wins per `hunch_id`.
+
+The UserPromptSubmit hook reads `feedback.jsonl` to enforce the approval gate: only hunches labeled `good` are injected. This makes the label bank grow as a natural byproduct of using the system.
 
 **Contract:**
-- `feedback.jsonl` is append-only. A hunch may accumulate multiple feedback entries (explicit + implicit, or multiple implicit if it comes up again).
-- The Critic reads `feedback.jsonl` on each tick via `prior_hunches` context to avoid repeating suppressed hunches.
+- `feedback.jsonl` is append-only.
+- The Critic reads `hunches.jsonl` (for prior hunch content and status) and `feedback.jsonl` (for labels) on each tick via `prior_hunches` context to avoid repeating suppressed hunches.
 
 **Future extensions:**
-- **Mentorship dialogue** — full back-and-forth log per hunch, stored separately (`.hunch/mentorship/<hunch_id>.jsonl`) but conceptually a third feedback channel.
+- **Implicit feedback** — when a hunch is injected, record the Scientist's reply text as an implicit label (`{"label": "implicit", "scientist_reply": ...}`). Captures *how* the Scientist acted on the hunch, which is often richer than the explicit label.
+- **Autonomous injection (removing the gate)** — once the Critic is well-calibrated, consider injecting all pending hunches without requiring an explicit `good` label. The gate is the right default while the Critic is young.
+- **Mentorship dialogue** — full back-and-forth log per hunch, stored separately (`.hunch/mentorship/<hunch_id>.jsonl`) but conceptually a second feedback channel.
 - **Principle extraction** — dialogues produce principles the Critic writes to its own scratchpad; those principles are mergeable/transferable (see VISION § Mergeability).
 - **Retroactive feedback** — Scientist can, hours or days later, retroactively label a hunch that was silently ignored.
 
@@ -223,8 +229,8 @@ Both channels append. No deletion.
 **Three layers (per invariant #7):**
 
 - **Required interface (Layer 1):** Hunch needs to know two paths — the Claude Code transcript location (auto-detected from CC conventions) and the artifact directories to watch. That's the minimum.
-- **Auto-discovery (Layer 3):** If no `hunch.config.toml` is present, Hunch scans the working directory for `.md` files (respecting `.gitignore`) and common figure dirs (`figures/`, `figs/`, `images/`, `plots/`). Shows discovered paths to user on first run with a confirm-or-edit prompt.
-- **`hunch init` scaffolding (Layer 2):** Drops a starter `CLAUDE.md` encoding the recommended research-cycle habits, a default directory layout, a tmux config fragment at `~/.hunch/tmux.conf` (with pane layout, keybindings, and the side-panel launcher), and a populated `hunch.config.toml`. The user adds a single `source-file ~/.hunch/tmux.conf` line to their own `~/.tmux.conf` — we **source**, we do not **merge** (i.e., we never rewrite or edit the user's tmux config in place). Uninstalling Hunch is a one-line comment; our config is independently updatable without touching the user's settings.
+- **Auto-discovery (Layer 2):** If no `hunch.config.toml` is present, Hunch scans the working directory for `.md` files (respecting `.gitignore`) and common figure dirs (`figures/`, `figs/`, `images/`, `plots/`). Shows discovered paths to user on first run with a confirm-or-edit prompt.
+- **`hunch init` scaffolding (Layer 3):** Three side effects: (1) creates `.hunch/replay/` (with `artifacts/` subdir), (2) merges a `UserPromptSubmit` hook into `.claude/settings.local.json` (for hunch injection), and (3) merges a `Stop` hook into the same file (for `claude_stopped` event delivery to the trigger). Designed to be non-destructive: if the settings file already exists, hook entries are merged rather than overwritten. Future iterations may add a starter `CLAUDE.md`, tmux config fragment, and a populated `hunch.config.toml`.
 
 **Config file (`hunch.config.toml`) v0 schema:**
 
@@ -234,19 +240,22 @@ transcript = "~/.claude/projects/<auto-detected>"
 artifacts  = ["writeups/", "figures/"]
 replay     = ".hunch/replay/"
 
+[trigger]
+min_debounce_s   = 300    # minimum seconds between ticks
+silence_s        = 30     # classic mode: fire after this much silence
+max_interval_s   = 600    # classic mode: forced fire ceiling
+
 [critic]
-command       = "python -m hunch.critic.stateless_sonnet"
-tick_interval = 10   # seconds
-tick_timeout  = 30   # seconds
-on_busy       = "skip"
+command          = "python -m hunch.critic.sonnet"
+tick_timeout     = 30    # seconds
+on_busy          = "skip"
 
 [surface]
 tmux_pane_main   = "researcher"
 tmux_pane_side   = "hunch"
-hook_script      = "~/.claude/hooks/hunch_inject.sh"
 ```
 
-**Tmux setup is independent of the research loop.** The pane layout, keybindings, and side-panel launcher are pure UI plumbing. They observe nothing from the Researcher's conventions and require no cooperation from the Scientist's CLAUDE.md or directory structure. The research loop is unaware of Hunch; Hunch observes it. (The one place framework wiring does touch the Researcher side is the `UserPromptSubmit` hook — configured in Claude Code's own settings, not in anything the research loop provides.)
+**Tmux setup is independent of the research loop.** The pane layout, keybindings, and side-panel launcher are pure UI plumbing. They observe nothing from the Researcher's conventions and require no cooperation from the Scientist's CLAUDE.md or directory structure. The research loop is unaware of Hunch; Hunch observes it. (The two places framework wiring touches the Researcher side are the `UserPromptSubmit` and `Stop` hooks — configured in Claude Code's own settings, not in anything the research loop provides.)
 
 **Portability note (macOS + Linux):**
 - tmux, Python, Claude Code, Anthropic API all work cleanly on both.
@@ -282,8 +291,8 @@ Keeps every future injection mechanism (side panel, UserPromptSubmit, PreToolUse
 **D6: Dual-channel feedback (explicit + implicit).**
 Explicit gives clean labels for the learning loop; implicit captures *how* the Scientist acted on the hunch (often richer). Both feed the mentorship loop later.
 
-**D7: Explicit-bad/skip suppresses prepend.**
-UX correctness: if a hunch is bad, it shouldn't pollute the Researcher's context. The suppression gate lives in the UserPromptSubmit hook, which checks hunch status before prepending.
+**D7: Approval gate — only `good`-labeled hunches are injected.**
+UX correctness: hunches must be explicitly approved by the Scientist before they reach the Researcher. The gate lives in the UserPromptSubmit hook, which checks both the folded hunch status (`pending`) and the explicit label in `feedback.jsonl` (`good`). This ensures the Scientist triages hunches in the side panel before injection, and builds the label bank as a natural byproduct. `bad` and `skip` labels suppress injection; unlabeled hunches stay pending.
 
 **D8: Tmux cross-pane keybindings with `send-keys`.**
 Lets the Scientist control the side panel (good/bad/skip/inject) without leaving the main terminal. `send-keys` is tmux-native and cross-OS. The `Alt-i` (inject-now) key uses `send-keys Enter` to trigger a turn on the Researcher with no additional input, leveraging the UserPromptSubmit hook to prepend the hunch — elegant reuse of the injection mechanism.
@@ -300,8 +309,8 @@ Cheap, underrated. Lets even stateless Critics avoid repeating themselves and le
 
 Things we chose not to decide now, and what would make us revisit.
 
-- **Critic trigger cadence (10s default).** Revisit when a user reports either "too noisy" or "misses obvious moments."
-- **Window size the Critic sees.** Revisit when `critic_v0.md` is written.
+- **Critic trigger cadence (300s debounce default).** Revisit when a user reports either "too noisy" or "misses obvious moments." See `docs/trigger_policy_v1.md` for the analysis behind the current default.
+- **Window size the Critic sees.** Revisit as accumulator parameters are tuned (see `critic_v0.1.md`).
 - **Mentorship dialogue UI details.** Revisit at v0.5 — the protocol message type is reserved now so the framework doesn't need changes.
 - **File-watching upgrade (polling → watchdog).** Revisit when polling latency becomes noticeable (>5s felt).
 - **Non-Claude-Code Researchers.** Revisit when a Scientist wants to use Cursor / Aider / etc.
@@ -314,7 +323,7 @@ Things we chose not to decide now, and what would make us revisit.
 
 Rough order. Not a Gantt — just dependencies.
 
-1. **Repo skeleton + package layout** — `hunch/` Python package, `hunch watch` CLI entry point, `hunch init` stub.
+1. **Repo skeleton + package layout** — `hunch/` Python package, `hunch panel` CLI entry point, `hunch init`.
 2. **Replay buffer writer (Capture)** — poll CC transcript, chunk via existing parser, snapshot artifacts.
 3. **Replay buffer schema + fixtures** — pin the JSONL shapes, write unit tests.
 4. **Critic protocol + in-process stub** — stateless Sonnet call with mining-prompt port.
@@ -322,7 +331,7 @@ Rough order. Not a Gantt — just dependencies.
 6. **`hunches.jsonl` + `feedback.jsonl` writers** — append semantics, status-event helpers, status-folding reader.
 7. **Side panel TUI** — tail hunches, render, capture keys (textual or prompt_toolkit).
 8. **Tmux config + keybindings** — `Alt-g/b/s/i`, pane layout.
-9. **UserPromptSubmit hook script** — reads hunches, prepends, appends status-change event, logs implicit feedback.
+9. **UserPromptSubmit + Stop hook scripts** — UserPromptSubmit reads hunches + feedback, prepends approved hunches, appends status-change event. Stop hook appends `claude_stopped` event to enable the trigger.
 10. **`hunch init`** — scaffolds CLAUDE.md, layout, tmux snippet, config.
 11. **End-to-end dry run** on Ariel's machine.
 12. **Deliver to first user(s) + onboarding session.**
@@ -341,7 +350,7 @@ Possible paths (none decided):
 
 - `PreToolUse` hook — offers mid-stretch injection but risks breaking active workflow.
 - `Stop` hook with `decision: block` — the Researcher can't end its turn while hunches are unread. Forces surfacing but frustrates if the Scientist is genuinely away.
-- Confidence-threshold gating — high-bar hunches interject, low-bar ones queue. Requires the calibrated confidence we explicitly deferred in `critic_v0.md`.
+- Confidence-threshold gating — high-bar hunches interject, low-bar ones queue. Requires calibrated confidence (deferred).
 - SDK wrapping for true mid-turn injection — heavy, but the only path to real-time interjection.
 
 Strategic stance: v0 accepts post-mortem for the Scientist-away case (since the Scientist's next prompt is itself a natural pause). This is the top v0.5 candidate. The transition from "Scientist-gated" to "autonomous interject" is almost certainly per-hunch (a confidence threshold), not a global mode flip.
@@ -393,7 +402,7 @@ Contract test (`tests/test_journal_concurrency.py`) verifies: valid JSON on ever
   "ts": "2026-04-14T10:23:14Z",
   "event": "write" | "edit" | "delete",
   "path": "writeups/exp_042.md",
-  "snapshot_path": "artifacts/writeups_exp_042.md__20260414T102314Z",
+  "snapshot": "writeups_exp_042.md__20260414T102314Z",
   "diff": { /* for edits, old_string + new_string */ }
 }
 ```
@@ -419,7 +428,7 @@ Contract test (`tests/test_journal_concurrency.py`) verifies: valid JSON on ever
   "type": "status_change",
   "hunch_id": "h-0007",
   "ts": "2026-04-14T10:24:02Z",
-  "new_status": "shown_to_researcher" | "suppressed" | "good_pending_inject" | ...,
+  "new_status": "surfaced" | "suppressed" | ...,
   "by": "scientist_key:alt_g" | "hook:user_prompt_submit" | ...
 }
 ```
@@ -438,7 +447,7 @@ The pair is a range rather than a single point because the frame "what's new vs 
 - **Novelty judging.** The judge scans all dialogue with `tick_seq ≤ bookmark_now` for already-raised concerns. The divider at `bookmark_prev` doesn't gate the search — anything said anywhere before `bookmark_now` invalidates strict novelty. The divider is reasoning aid: it lets the judge articulate *where* the match lies (prior-context redundancy vs same-window concurrence vs genuine first voice).
 - **Human labeling.** Same divider, same purpose — it makes "novel vs redundant" legible at a glance, which is the hard part of the annotation task.
 
-Offline evaluators that need this attribution live in the eval harness, not in the framework — see `agentic_research_critic/docs/eval_infrastructure.md` for the novelty-judge contract.
+Offline evaluators that need this attribution live in the eval harness, not in the framework — see `agentic_research_critic/docs/eval_infrastructure.md` (sibling project) for the novelty-judge contract.
 
 `.hunch/replay/feedback.jsonl`:
 
@@ -451,6 +460,20 @@ Offline evaluators that need this attribution live in the eval harness, not in t
   "scientist_reply": null | "<text of their prompt>"
 }
 ```
+
+`.hunch/replay/labels.jsonl` — offline eval annotations (distinct from live `feedback.jsonl`):
+
+```jsonc
+{
+  "ts": "2026-04-14T11:00:00Z",
+  "hunch_id": "h-0007",
+  "label": "tp" | "fp" | "skip",
+  "category": null | "<optional category tag>",
+  "note": null | "<optional free-text note>"
+}
+```
+
+Live feedback captures the Scientist's in-the-moment reaction; labels capture deliberate offline evaluation for precision measurement. Both are append-only; for labels, last-write-wins per `hunch_id`.
 
 ## Appendix B: Critic protocol messages
 
