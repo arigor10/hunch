@@ -1,6 +1,6 @@
 """`hunch init` — set up a project for Hunch.
 
-Two side effects, both idempotent:
+Three side effects, all idempotent:
 
   1. Create `<cwd>/.hunch/replay/` so the framework has somewhere to
      write its event-sourced log.
@@ -8,10 +8,13 @@ Two side effects, both idempotent:
      `<cwd>/.claude/settings.local.json` so Claude Code will invoke
      `hunch hook user-prompt-submit` on every user prompt, letting
      pending hunches be injected into the Researcher's context.
+  3. Merge the Stop hook entry into the same settings file so Claude
+     Code will invoke `hunch hook stop` when Claude finishes a turn,
+     appending a `claude_stopped` event to the replay buffer.
 
 The merge is deliberately additive: every existing key in the JSON
-file is preserved byte-identical. If the UserPromptSubmit hook is
-already wired to the hunch command, `init` is a no-op and says so.
+file is preserved byte-identical. If both hooks are already wired,
+`init` is a no-op and says so.
 
 We ship a small install-surface on purpose. Anything more ambitious
 (session-start hooks, custom replay-dir location, auto-inject of
@@ -27,7 +30,8 @@ from pathlib import Path
 from typing import Any
 
 
-HOOK_COMMAND = "hunch hook user-prompt-submit"
+UPS_HOOK_COMMAND = "hunch hook user-prompt-submit"
+STOP_HOOK_COMMAND = "hunch hook stop"
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +47,7 @@ class InitResult:
     """
     replay_dir_created: bool
     settings_file_created: bool
-    hook_added: bool
+    hooks_added: list[str]
     already_initialized: bool
 
     def as_lines(self, replay_dir: Path, settings_path: Path) -> list[str]:
@@ -56,8 +60,9 @@ class InitResult:
             lines.append(f"  existing {replay_dir}")
         if self.settings_file_created:
             lines.append(f"  created  {settings_path}")
-        elif self.hook_added:
-            lines.append(f"  updated  {settings_path} (added UserPromptSubmit hook)")
+        elif self.hooks_added:
+            added = ", ".join(self.hooks_added)
+            lines.append(f"  updated  {settings_path} (added {added} hook(s))")
         else:
             lines.append(f"  unchanged {settings_path}")
         return lines
@@ -75,19 +80,18 @@ def init_project(cwd: Path) -> InitResult:
     replay_dir_created = not replay_dir.exists()
     replay_dir.mkdir(parents=True, exist_ok=True)
 
-    settings_file_created, hook_added, already_there = _merge_hook(settings_path)
+    settings_file_created, hooks_added = _merge_hooks(settings_path)
 
     already_initialized = (
         not replay_dir_created
         and not settings_file_created
-        and not hook_added
-        and already_there
+        and not hooks_added
     )
 
     return InitResult(
         replay_dir_created=replay_dir_created,
         settings_file_created=settings_file_created,
-        hook_added=hook_added,
+        hooks_added=hooks_added,
         already_initialized=already_initialized,
     )
 
@@ -96,21 +100,22 @@ def init_project(cwd: Path) -> InitResult:
 # Internals
 # ---------------------------------------------------------------------------
 
-def _merge_hook(settings_path: Path) -> tuple[bool, bool, bool]:
-    """Ensure the UserPromptSubmit hook is present in the settings file.
+_HOOKS_TO_REGISTER: list[tuple[str, str]] = [
+    ("UserPromptSubmit", UPS_HOOK_COMMAND),
+    ("Stop", STOP_HOOK_COMMAND),
+]
 
-    Returns `(file_created, hook_added, hook_already_present)`.
 
-    Loading strategy: if the file doesn't exist, create a minimal one
-    with only the hooks section. If it exists but is invalid JSON, we
-    refuse to touch it — the user has hand-edited it in a way we don't
-    understand, and clobbering would be strictly worse than doing nothing.
+def _merge_hooks(settings_path: Path) -> tuple[bool, list[str]]:
+    """Ensure both hooks are present in the settings file.
+
+    Returns `(file_created, list_of_hook_names_added)`.
     """
     if not settings_path.exists():
         settings_path.parent.mkdir(parents=True, exist_ok=True)
         settings = _minimal_settings()
         _write_settings(settings_path, settings)
-        return True, False, False
+        return True, []
 
     try:
         with open(settings_path) as f:
@@ -125,42 +130,44 @@ def _merge_hook(settings_path: Path) -> tuple[bool, bool, bool]:
     if not isinstance(hooks, dict):
         raise RuntimeError(
             f"{settings_path}: 'hooks' is not an object; "
-            f"cannot merge UserPromptSubmit entry"
+            f"cannot merge hook entries"
         )
 
-    ups = hooks.setdefault("UserPromptSubmit", [])
-    if not isinstance(ups, list):
-        raise RuntimeError(
-            f"{settings_path}: 'hooks.UserPromptSubmit' is not an array"
-        )
+    added: list[str] = []
+    for hook_name, command in _HOOKS_TO_REGISTER:
+        hook_list = hooks.setdefault(hook_name, [])
+        if not isinstance(hook_list, list):
+            raise RuntimeError(
+                f"{settings_path}: 'hooks.{hook_name}' is not an array"
+            )
+        if not _hook_already_present(hook_list, command):
+            hook_list.append(_hunch_hook_entry(command))
+            added.append(hook_name)
 
-    if _hook_already_present(ups):
-        return False, False, True
-
-    ups.append(_hunch_hook_entry())
-    _write_settings(settings_path, settings)
-    return False, True, False
+    if added:
+        _write_settings(settings_path, settings)
+    return False, added
 
 
-def _hook_already_present(ups: list[Any]) -> bool:
-    """True if any entry in UserPromptSubmit runs the hunch command."""
-    for group in ups:
+def _hook_already_present(hook_list: list[Any], command: str) -> bool:
+    """True if any entry in the hook list runs the given command."""
+    for group in hook_list:
         if not isinstance(group, dict):
             continue
         for hook in group.get("hooks") or []:
             if not isinstance(hook, dict):
                 continue
-            if hook.get("type") == "command" and hook.get("command") == HOOK_COMMAND:
+            if hook.get("type") == "command" and hook.get("command") == command:
                 return True
     return False
 
 
-def _hunch_hook_entry() -> dict[str, Any]:
+def _hunch_hook_entry(command: str) -> dict[str, Any]:
     return {
         "hooks": [
             {
                 "type": "command",
-                "command": HOOK_COMMAND,
+                "command": command,
             }
         ]
     }
@@ -169,8 +176,9 @@ def _hunch_hook_entry() -> dict[str, Any]:
 def _minimal_settings() -> dict[str, Any]:
     return {
         "hooks": {
-            "UserPromptSubmit": [_hunch_hook_entry()],
-        }
+            hook_name: [_hunch_hook_entry(command)]
+            for hook_name, command in _HOOKS_TO_REGISTER
+        },
     }
 
 

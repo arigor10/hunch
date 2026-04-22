@@ -7,7 +7,7 @@ import json
 import pytest
 
 from hunch.cli import main as cli_main
-from hunch.init import HOOK_COMMAND, init_project
+from hunch.init import STOP_HOOK_COMMAND, UPS_HOOK_COMMAND, init_project
 
 
 # ---------------------------------------------------------------------------
@@ -24,8 +24,10 @@ def test_init_fresh_project_creates_settings_file(tmp_path):
     result = init_project(tmp_path)
     assert result.settings_file_created is True
     settings = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
-    commands = _all_hook_commands(settings, "UserPromptSubmit")
-    assert HOOK_COMMAND in commands
+    ups_cmds = _all_hook_commands(settings, "UserPromptSubmit")
+    assert UPS_HOOK_COMMAND in ups_cmds
+    stop_cmds = _all_hook_commands(settings, "Stop")
+    assert STOP_HOOK_COMMAND in stop_cmds
 
 
 def test_init_preserves_existing_unrelated_settings(tmp_path):
@@ -51,7 +53,7 @@ def test_init_preserves_existing_unrelated_settings(tmp_path):
     assert "echo hello" in session_cmds
     # UserPromptSubmit now added.
     ups_cmds = _all_hook_commands(settings, "UserPromptSubmit")
-    assert HOOK_COMMAND in ups_cmds
+    assert UPS_HOOK_COMMAND in ups_cmds
 
 
 def test_init_coexists_with_other_userpromptsubmit_hook(tmp_path):
@@ -71,7 +73,7 @@ def test_init_coexists_with_other_userpromptsubmit_hook(tmp_path):
         json.loads(settings_path.read_text()), "UserPromptSubmit"
     )
     assert "some_other_tool" in cmds
-    assert HOOK_COMMAND in cmds
+    assert UPS_HOOK_COMMAND in cmds
 
 
 # ---------------------------------------------------------------------------
@@ -82,13 +84,15 @@ def test_init_twice_is_idempotent(tmp_path):
     init_project(tmp_path)
     result2 = init_project(tmp_path)
     assert result2.already_initialized is True
-    assert result2.hook_added is False
-    # Still only one hunch hook entry.
+    assert result2.hooks_added == []
+    # Still only one hunch hook entry per type.
     settings = json.loads(
         (tmp_path / ".claude" / "settings.local.json").read_text()
     )
-    cmds = _all_hook_commands(settings, "UserPromptSubmit")
-    assert cmds.count(HOOK_COMMAND) == 1
+    ups_cmds = _all_hook_commands(settings, "UserPromptSubmit")
+    assert ups_cmds.count(UPS_HOOK_COMMAND) == 1
+    stop_cmds = _all_hook_commands(settings, "Stop")
+    assert stop_cmds.count(STOP_HOOK_COMMAND) == 1
 
 
 def test_init_second_run_preserves_edited_adjacent_hook(tmp_path):
