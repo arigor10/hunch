@@ -1,17 +1,19 @@
 """Claude Code hook handlers.
 
-Hunch installs a `UserPromptSubmit` hook in the target project's
-`.claude/settings.local.json` (gitignored, per-user). When the
-Scientist presses Enter, Claude Code invokes the hook with the
-current tool input on stdin and waits for structured JSON back on
-stdout; what we emit in `hookSpecificOutput.additionalContext` is
-injected into the Researcher's system prompt for this one turn.
+Hunch installs two hooks in the target project's
+`.claude/settings.local.json` (gitignored, per-user):
 
-This package holds the hook handlers. The CLI (`hunch hook <name>`)
-dispatches argv into them; all real logic lives here so it can be
-unit-tested without shelling out.
+  - `UserPromptSubmit`: fires when the Scientist presses Enter.
+    Injects pending hunches as additionalContext.
+  - `Stop`: fires when Claude finishes a turn. Appends a
+    `claude_stopped` event to conversation.jsonl so the framework
+    loop can fire the Critic before the user's next message.
+
+The CLI (`hunch hook <name>`) dispatches argv into them; all real
+logic lives here so it can be unit-tested without shelling out.
 """
 
+from hunch.hook.stop import handle_stop
 from hunch.hook.user_prompt_submit import handle_user_prompt_submit
 
-__all__ = ["handle_user_prompt_submit"]
+__all__ = ["handle_stop", "handle_user_prompt_submit"]
