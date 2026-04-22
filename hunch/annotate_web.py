@@ -38,6 +38,25 @@ from typing import Any
 
 
 # ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+def _validate_replay_dir(replay_dir: Path) -> None:
+    if not replay_dir.is_dir():
+        raise SystemExit(
+            f"Error: replay directory does not exist: {replay_dir}"
+        )
+    expected = ["conversation.jsonl", "artifacts.jsonl"]
+    missing = [f for f in expected if not (replay_dir / f).exists()]
+    if missing:
+        raise SystemExit(
+            f"Error: replay directory {replay_dir} is missing: "
+            + ", ".join(missing)
+            + "\n  (Did you mean to pass the replay/ subdirectory?)"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Data loading (shared with annotate.py)
 # ---------------------------------------------------------------------------
 
@@ -555,6 +574,7 @@ def create_app(
     except ImportError:
         raise ImportError("flask is required: pip install flask")
 
+    _validate_replay_dir(replay_dir)
     conversation = _load_conversation(replay_dir / "conversation.jsonl")
     hunches = _load_hunches(run_dir / "hunches.jsonl")
 

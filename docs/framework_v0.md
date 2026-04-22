@@ -54,13 +54,14 @@ Build the skeleton so that every component we ship is **additive toward** the lo
                                      (same files, one source of truth)
 ```
 
-**Five load-bearing components:**
+**Seven load-bearing components:**
 
 1. **Capture** — writes the replay buffer
 2. **Trigger** — decides when the Critic evaluates
-3. **Critic** (interface only, implementation deferred) — reads replay buffer, writes hunches
-4. **Surface** — shows hunches to the Scientist; prepends approved hunches to Researcher's next prompt
-5. **Feedback** — records Scientist reactions (explicit keys + implicit reply)
+3. **Critic** (interface only, implementation deferred) — reads replay buffer, produces hunches
+4. **Filter** — drops hunches that are duplicates of earlier hunches or that the Researcher already raised in conversation
+5. **Surface** — shows hunches to the Scientist; prepends approved hunches to Researcher's next prompt
+6. **Feedback** — records Scientist reactions (explicit keys + implicit reply)
 
 Plus cross-cutting: **Config** (paths, scaffolding) and the **Replay buffer** (the central data artifact).
 
@@ -102,10 +103,11 @@ If we're ever tempted to violate one of these to save time in v0, stop and rethi
 
 ### 2. Trigger
 
-**Two modes implemented:**
+Each Critic tick costs real money and attention, so we trigger sparingly. The Critic also cannot interject mid-turn — Claude Code doesn't support interruption — so there's no value in firing while Claude is actively working. And firing during a back-and-forth between the Scientist and the Researcher would be disruptive; the Scientist is steering, not waiting for outside input.
 
-- **Classic (time-based).** Fire when Claude has been silent for `silence_s` (default 30s), subject to `min_debounce_s` between ticks and a `max_interval_s` forced fire for long monologues. If the Critic is still mid-tick when the next fire time arrives, skip. Used by the offline replay driver when `fire_on_turn_end=False`.
-- **Claude-stopped (turn-end).** Fire when a `claude_stopped` event appears in the replay buffer — appended by the `Stop` hook when Claude finishes a turn. The Critic fires immediately (within 1s poll) provided the debounce interval (default 300s) has elapsed since the last tick. This is the mode `hunch run` uses. It matches the meeting-room framing: the colleague raises a hand the moment the Researcher pauses, rather than waiting for the Scientist to speak. See `docs/trigger_policy_v1.md` for the analysis behind this mode. For offline replay, `claude_stopped` events are synthesized at speaker boundaries (assistant → user transitions) by `synthesize_claude_stopped()` in the replay loader.
+The natural moment is when Claude has finished a turn and a silence gap opens — the Researcher has paused, the Scientist hasn't spoken yet, and a colleague glancing up from a notebook would say "hey, before you move on…". The framework fires when a `claude_stopped` event appears in the replay buffer (appended by the `Stop` hook when Claude finishes a turn), provided the debounce interval (default 300s) has elapsed since the last tick. See [`docs/trigger_policy_v1.md`](trigger_policy_v1.md) for the quantitative analysis behind this policy.
+
+For offline replay (eval runs on historical data), `claude_stopped` events are synthesized at speaker boundaries (assistant → user transitions) by `synthesize_claude_stopped()` in the replay loader, so the same trigger policy applies.
 
 **Contract:**
 - Tick is a JSON message on the Critic's stdin: `{"tick_id", "bookmark_prev", "bookmark_now"}`.
@@ -162,7 +164,18 @@ The Critic has read access to the entire `.hunch/replay/` directory. It pulls wh
 - Ensemble of Critics with principle-merging across them (see VISION § Mergeability).
 - Mentorship dialogue driven by the second tick type already reserved above.
 
-### 4. Surface
+### 4. Filter (novelty + dedup)
+
+After the Critic emits hunches and before they are written to `hunches.jsonl`, the framework runs a lightweight filter that suppresses two classes of noise:
+
+- **Duplicate hunches.** The Critic sees overlapping replay windows across ticks and may re-emit the same concern in different words. The filter compares each new hunch against the *K* most recent prior hunches (from `hunches.jsonl`) by semantic similarity, where *K* is a configurable window (default TBD). Capping the comparison set avoids quadratic cost growth over long sessions. If a new hunch matches an existing one above a threshold, it is dropped.
+- **Already-raised concerns.** The Researcher or Scientist may have already discussed the concern in conversation. The filter scans the dialogue in the replay buffer (up to the current bookmark) for prior mentions of the hunch's smell. If the concern was already on the table, the hunch adds no signal and is dropped.
+
+Both checks use an LLM judge (a fast, cheap call — separate from the Critic itself). Hunches that pass the filter are written to `hunches.jsonl` as `pending`; filtered hunches are either silently dropped or written with a `filtered` status (TBD — keeping them aids debugging but adds noise to the file).
+
+The same filter logic is used in offline eval (see [`docs/eval_infrastructure.md`](eval_infrastructure.md)), where it runs as a post-processing step over the full set of emitted hunches.
+
+### 5. Surface
 
 **v0:** A tmux layout with two panes:
 - **Main pane** runs `claude` (the Scientist's Researcher session).
@@ -202,7 +215,7 @@ All four keybindings can fire regardless of which pane has focus — the Scienti
 - Mouse / click support in the side panel TUI.
 - Slack / web UI surfaces that consume the same files.
 
-### 5. Feedback
+### 6. Feedback
 
 **v0:** Explicit labels only:
 
@@ -224,7 +237,7 @@ The UserPromptSubmit hook reads `feedback.jsonl` to enforce the approval gate: o
 - **Principle extraction** — dialogues produce principles the Critic writes to its own scratchpad; those principles are mergeable/transferable (see VISION § Mergeability).
 - **Retroactive feedback** — Scientist can, hours or days later, retroactively label a hunch that was silently ignored.
 
-### 6. Config & scaffolding
+### 7. Config & scaffolding
 
 **Three layers (per invariant #7):**
 
@@ -447,7 +460,7 @@ The pair is a range rather than a single point because the frame "what's new vs 
 - **Novelty judging.** The judge scans all dialogue with `tick_seq ≤ bookmark_now` for already-raised concerns. The divider at `bookmark_prev` doesn't gate the search — anything said anywhere before `bookmark_now` invalidates strict novelty. The divider is reasoning aid: it lets the judge articulate *where* the match lies (prior-context redundancy vs same-window concurrence vs genuine first voice).
 - **Human labeling.** Same divider, same purpose — it makes "novel vs redundant" legible at a glance, which is the hard part of the annotation task.
 
-Offline evaluators that need this attribution live in the eval harness, not in the framework — see `agentic_research_critic/docs/eval_infrastructure.md` (sibling project) for the novelty-judge contract.
+Offline evaluators that need this attribution live in the eval harness, not in the framework — see [`docs/eval_infrastructure.md`](eval_infrastructure.md) for the novelty-judge contract.
 
 `.hunch/replay/feedback.jsonl`:
 
