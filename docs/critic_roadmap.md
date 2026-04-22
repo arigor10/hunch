@@ -14,7 +14,7 @@ The Critic develops in three generations, each distinguished by a structural bou
 
 **v2.x — self-improving through mentorship.** The Critic learns from the Scientist. It detects its own gaps (hunches the Scientist caught that it missed), asks the Scientist how they knew, and distills the answer into transferable principles that improve future performance. This is the learning-by-mentorship loop described in VISION.md. v2 depends on v1: the mentorship loop is only as valuable as the knowledge substrate it writes into. A Critic that can't maintain a coherent mental model of the research (v1's knowledge base, hypothesis list, established facts) has nowhere useful to store what it learns from the Scientist. The principles would be appended to a broken knowledge base. v1 builds the substrate; v2 fills it through dialogue.
 
-It is too early to detail v2. The rest of this document focuses on v1. For v0 specifics see `critic_v0.md` and `critic_v0.1.md`.
+It is too early to detail v2. The rest of this document focuses on v1. For the accumulating Critic design see `critic_v0.1.md`.
 
 ---
 
@@ -94,4 +94,4 @@ This constancy is deliberate. It means we can run Critics from different generat
 - **Cross-session persistence.** Does the knowledge base carry across research sessions? If yes, it becomes genuine long-term memory — powerful but potentially stale. If no, the Critic rebuilds it each session, which is safe but loses continuity.
 ---
 
-*This document is a roadmap, not a spec. The v0 details are in `critic_v0.md` and `critic_v0.1.md`. The v1 details will get their own design docs as we build them. This document is the "why this order" and "where are we going" layer.*
+*This document is a roadmap, not a spec. The v0 details are in `critic_v0.1.md`. The v1 details will get their own design docs as we build them. This document is the "why this order" and "where are we going" layer.*

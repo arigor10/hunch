@@ -146,9 +146,9 @@ Roughly:
 - `hunch/critic/accumulator.py` — new — maintains the prompt stream,
   token bookkeeping, purge trigger, post-purge rebuild. Unit-tested
   especially around snapshot reconstruction.
-- `hunch/critic/stateless_sonnet.py` — extend to consume the
-  accumulator's rendered prompt, switch to `--output-format json`, and
-  feed observed `usage.input_tokens` back into the bookkeeper.
+- `hunch/critic/sonnet.py` — consumes the accumulator's rendered
+  prompt, shells out to `claude --print`, and feeds observed
+  `usage.input_tokens` back into the bookkeeper.
 - `hunch/critic/prompts/nose_v1.md` — adapted prompt template aware of
   inline hunches + labels + living-artifacts block.
 - Tests for: the four-region render; purge math; snapshot

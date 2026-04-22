@@ -1,6 +1,8 @@
 # Hunch — Critic v0 Design
 
-*Companion to `framework_v0.md`. Describes the Critic implementation that ships in v0 — the stub that rides on the framework. The framework is the heavy lift; the Critic is deliberately minimal.*
+> **Deprecated.** This doc describes the stateless single-call Critic, which has been superseded by the accumulating Critic v0.1 (see [`critic_v0.1.md`](critic_v0.1.md)). Kept for historical context only — the code (`stateless_sonnet.py`) has been removed.
+
+*Companion to `framework_v0.md`. Describes the original minimal Critic implementation.*
 
 ---
 
