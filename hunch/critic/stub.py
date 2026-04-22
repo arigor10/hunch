@@ -1,15 +1,9 @@
 """A no-op Critic for wiring up the framework.
 
-`StubCritic` exists so the framework's trigger → Critic → hunches.jsonl
-pipeline can be built and integration-tested before the real Sonnet-
-backed Critic lands. It satisfies the `Critic` protocol and records
-every call it receives, so tests can assert that the framework is
-speaking to it correctly.
-
-Once `hunch/critic/stateless_sonnet.py` lands (per critic_v0.md), the
-framework swaps this out via config. Keeping the stub checked in is
-also useful for offline development, CI, and demos where hitting the
-Anthropic API is undesirable.
+`StubCritic` satisfies the `Critic` protocol and records every call it
+receives, so tests can assert that the framework is speaking to it
+correctly. Also useful for offline development, CI, and demos where
+hitting the Anthropic API is undesirable.
 """
 
 from __future__ import annotations

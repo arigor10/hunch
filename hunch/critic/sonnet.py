@@ -32,6 +32,7 @@ rendered timeline matches disk.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,7 +43,68 @@ from hunch.critic.accumulator import (
     load_prompt_template,
 )
 from hunch.critic.protocol import Hunch, TriggeringRefs
-from hunch.critic.stateless_sonnet import parse_response
+
+
+_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*?)\n```\s*$", re.DOTALL)
+
+
+def _strip_fences(text: str) -> str:
+    text = text.strip()
+    m = _FENCE_RE.match(text)
+    if m:
+        return m.group(1).strip()
+    return text
+
+
+def parse_response(text: str) -> list[Hunch]:
+    """Parse the model response into a list of Hunches.
+
+    The prompt asks for a raw JSON array. We tolerate accidental code
+    fences and prose-preamble on a best-effort basis — if parsing fails
+    at any level we return `[]` and let the caller log.
+    """
+    stripped = _strip_fences(text)
+    bracket = stripped.find("[")
+    if bracket == -1:
+        return []
+    candidate = stripped[bracket:]
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+
+    hunches: list[Hunch] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        smell = item.get("smell")
+        description = item.get("description")
+        if not isinstance(smell, str) or not isinstance(description, str):
+            continue
+        if not smell.strip() or not description.strip():
+            continue
+        refs_raw = item.get("triggering_refs") or {}
+        if not isinstance(refs_raw, dict):
+            refs_raw = {}
+        chunks = refs_raw.get("chunks") or []
+        artifacts = refs_raw.get("artifacts") or []
+        if not isinstance(chunks, list):
+            chunks = []
+        if not isinstance(artifacts, list):
+            artifacts = []
+        hunches.append(
+            Hunch(
+                smell=smell.strip(),
+                description=description.strip(),
+                triggering_refs=TriggeringRefs(
+                    chunks=[str(c) for c in chunks],
+                    artifacts=[str(a) for a in artifacts],
+                ),
+            )
+        )
+    return hunches
 
 
 DEFAULT_MODEL = "claude-sonnet-4-5-20250929"

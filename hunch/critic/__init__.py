@@ -9,8 +9,7 @@ framework caring — the wire format is defined in
 This package exposes:
   - `Critic` — the abstract interface the framework calls against.
   - `Hunch`, `TriggeringRefs` — the value shapes that flow back.
-  - `StubCritic` — a no-op implementation for wiring up the framework
-    before the real (Sonnet-backed) Critic lands.
+  - `StubCritic` — a no-op implementation for testing and CI.
 """
 
 from hunch.critic.protocol import (
