@@ -205,6 +205,7 @@ def test_from_dir_overwrite_hunches_replaces_file(tmp_path: Path):
     records = [
         json.loads(line)
         for line in (replay_dir / "hunches.jsonl").read_text().splitlines()
+        if line.strip() and json.loads(line).get("type") != "meta"
     ]
     # The stale h-9999 record is gone; only the fresh hunch from this run.
     assert all(r["hunch_id"] != "h-9999" for r in records)

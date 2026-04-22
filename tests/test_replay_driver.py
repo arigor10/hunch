@@ -184,7 +184,10 @@ def test_hunches_persist_to_hunches_jsonl(tmp_path: Path):
     )
     assert result.hunches_emitted == 1
     hunches_file = tmp_path / "replay" / "hunches.jsonl"
-    records = [json.loads(line) for line in hunches_file.read_text().splitlines()]
+    records = [
+        json.loads(line) for line in hunches_file.read_text().splitlines()
+        if line.strip() and json.loads(line).get("type") != "meta"
+    ]
     assert len(records) == 1
     assert records[0]["type"] == "emit"
     assert records[0]["hunch_id"] == "h-0001"
@@ -217,6 +220,7 @@ def test_persisted_hunch_bookmarks_match_tick_window(tmp_path: Path):
     records = [
         json.loads(line)
         for line in (tmp_path / "replay" / "hunches.jsonl").read_text().splitlines()
+        if line.strip() and json.loads(line).get("type") != "meta"
     ]
     # One hunch per emit_at tick, in emission order.
     assert [r["hunch_id"] for r in records] == ["h-0001", "h-0002", "h-0003"]

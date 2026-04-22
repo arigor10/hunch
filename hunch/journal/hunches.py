@@ -30,6 +30,18 @@ from hunch.journal.append import append_json_line
 
 _HUNCH_ID_RE = re.compile(r"^h-(\d+)$")
 
+META_NOTE = (
+    "Hunch is an AI colleague that watches this conversation and the "
+    "written artifacts in the background. It fires periodically based on "
+    "a triggering policy and flags things that may not add up \u2014 anomalies, "
+    "overlooked discrepancies, or patterns worth a second look. When the "
+    "user approves a hunch, it is delivered to you via the UserPromptSubmit "
+    "hook as a <hunch-injection> block on your next turn, and its status "
+    "here changes to 'surfaced'. Hunches marked 'surfaced' have already "
+    "been delivered to you and were likely addressed. You do not need to "
+    "respond to them again unless you believe they warrant revisiting."
+)
+
 
 @dataclass
 class HunchRecord:
@@ -83,6 +95,7 @@ class HunchesWriter:
         self.hunches_path = Path(self.hunches_path)
         self.hunches_path.parent.mkdir(parents=True, exist_ok=True)
         self._next_id_num = self._scan_max_id() + 1
+        self._ensure_meta_header()
 
     # -----------------------------------------------------------------
     # Public API
@@ -150,6 +163,12 @@ class HunchesWriter:
     # -----------------------------------------------------------------
     # Internals
     # -----------------------------------------------------------------
+
+    def _ensure_meta_header(self) -> None:
+        """Write the meta header as the first line if the file is new."""
+        if self.hunches_path.exists() and self.hunches_path.stat().st_size > 0:
+            return
+        self._append({"type": "meta", "note": META_NOTE})
 
     def _scan_max_id(self) -> int:
         """Find the largest existing `h-NNNN` id on disk (or 0 if empty)."""

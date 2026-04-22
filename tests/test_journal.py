@@ -73,7 +73,7 @@ def test_write_emit_produces_appendix_shape(tmp_path):
         _mk_hunch("smell-A", "desc-A"), hid, "t1",
         emitted_by_tick=42, bookmark_prev=5, bookmark_now=17,
     )
-    entries = _read_jsonl(w.hunches_path)
+    entries = [e for e in _read_jsonl(w.hunches_path) if e.get("type") != "meta"]
     assert len(entries) == 1
     e = entries[0]
     assert e["type"] == "emit"
@@ -97,7 +97,7 @@ def test_status_change_appends_not_mutates(tmp_path):
     w.write_emit(_mk_hunch(), hid, "t1", emitted_by_tick=1, bookmark_prev=0, bookmark_now=1)
     w.write_status_change(hid, "shown_to_researcher", "t2", by="hook:ups")
     w.write_status_change(hid, "suppressed", "t3", by="scientist_key:alt_s")
-    entries = _read_jsonl(w.hunches_path)
+    entries = [e for e in _read_jsonl(w.hunches_path) if e.get("type") != "meta"]
     assert len(entries) == 3  # all three events present, nothing rewritten
     assert [e["type"] for e in entries] == ["emit", "status_change", "status_change"]
     assert entries[1]["new_status"] == "shown_to_researcher"

@@ -171,7 +171,10 @@ def test_runner_fires_tick_on_claude_stopped(tmp_path):
     assert runner._tick_counter == 1
     hunches_path = tmp_path / "replay" / "hunches.jsonl"
     assert hunches_path.exists()
-    lines = [L for L in hunches_path.read_text().splitlines() if L.strip()]
+    lines = [
+        L for L in hunches_path.read_text().splitlines()
+        if L.strip() and json.loads(L).get("type") != "meta"
+    ]
     assert len(lines) == 1
     record = json.loads(lines[0])
     assert record["type"] == "emit"
