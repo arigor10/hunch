@@ -13,7 +13,7 @@ from hunch.replay.driver import (
     run_replay_from_claude_log,
     run_replay_from_dir,
 )
-from hunch.replay.loader import TriggerEvent, load_trigger_events
+from hunch.replay.loader import TriggerEvent, load_trigger_events, synthesize_claude_stopped
 
 __all__ = [
     "ReplayResult",
@@ -22,4 +22,5 @@ __all__ = [
     "run_replay",
     "run_replay_from_claude_log",
     "run_replay_from_dir",
+    "synthesize_claude_stopped",
 ]

@@ -86,3 +86,50 @@ def load_trigger_events(replay_dir: Path) -> list[TriggerEvent]:
             last_tick_seq = tick_seq
 
     return events
+
+
+_ASSISTANT_TYPES = frozenset({"assistant_text", "artifact_write", "artifact_edit", "figure"})
+
+
+def synthesize_claude_stopped(events: list[TriggerEvent]) -> list[TriggerEvent]:
+    """Insert synthetic `claude_stopped` events at speaker boundaries.
+
+    A `claude_stopped` is inserted just before every `user_text` event
+    that follows an assistant-side event (assistant_text, artifact_write,
+    artifact_edit, figure). This mirrors what the live Stop hook does:
+    when Claude finishes a turn, append a boundary marker.
+
+    The synthetic event reuses the *preceding* event's tick_seq. This
+    means the trigger fires with a bookmark that covers the assistant's
+    work but not the user's next message — matching live behavior where
+    the Stop hook fires before the user types.
+
+    The driver tolerates repeated tick_seqs in the stream (the
+    ``claude_stopped`` shares its predecessor's tick_seq). The following
+    ``user_text`` advances the bookmark, but the trigger ignores it
+    (only ``claude_stopped`` fires in turn-end mode).
+
+    If ``claude_stopped`` events already exist in the stream (from a
+    live session with the Stop hook), no duplicates are inserted.
+    """
+    if not events:
+        return events
+
+    result: list[TriggerEvent] = []
+    prev: TriggerEvent | None = None
+
+    for event in events:
+        if (
+            event.type == "user_text"
+            and prev is not None
+            and prev.type in _ASSISTANT_TYPES
+        ):
+            result.append(TriggerEvent(
+                tick_seq=prev.tick_seq,
+                type="claude_stopped",
+                timestamp=prev.timestamp,
+            ))
+        result.append(event)
+        prev = event
+
+    return result
