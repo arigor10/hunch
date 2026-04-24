@@ -136,6 +136,33 @@ class HunchesWriter:
         )
         self._append(record)
 
+    def write_filtered(
+        self,
+        hunch: Hunch,
+        hunch_id: str,
+        ts: str,
+        emitted_by_tick: int,
+        *,
+        bookmark_prev: int,
+        bookmark_now: int,
+        filter_type: str,
+        filter_reason: str,
+    ) -> None:
+        """Append a filtered event — a hunch the filter suppressed.
+
+        Same shape as an emit but with ``type: "filtered"`` and extra
+        fields recording why. Readers that only care about active
+        hunches skip these (they filter on ``type == "emit"``).
+        """
+        record = hunch_emit_record(
+            hunch, hunch_id, ts, emitted_by_tick,
+            bookmark_prev=bookmark_prev, bookmark_now=bookmark_now,
+        )
+        record["type"] = "filtered"
+        record["filter_type"] = filter_type
+        record["filter_reason"] = filter_reason
+        self._append(record)
+
     def write_status_change(
         self,
         hunch_id: str,
