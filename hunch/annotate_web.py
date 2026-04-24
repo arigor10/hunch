@@ -171,6 +171,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 .btn-fp:hover { background: #d00000; }
 .btn-skip { background: #555; color: #fff; }
 .btn-skip:hover { background: #777; }
+.btn-dup { background: #4a3800; color: #ffd54f; }
+.btn-dup:hover { background: #6d5200; }
+.badge-dup { background: #4a3800; color: #ffd54f; }
 #current-label { font-size: 13px; margin-left: 8px; }
 
 #main { display: flex; flex: 1; overflow: hidden; }
@@ -196,6 +199,18 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 #note-section input, #note-section select { background: #16213e; color: #e0e0e0; border: 1px solid #555; padding: 4px 8px; border-radius: 3px; font-size: 12px; }
 #note-section input { width: 100%; margin-top: 4px; }
 #note-section label { font-size: 12px; color: #888; }
+
+.tag-btn { padding: 3px 10px; border: 1px solid #555; border-radius: 3px; cursor: pointer; font-size: 11px; background: #16213e; color: #888; margin-right: 4px; }
+.tag-btn.active { background: #0f3460; color: #7eb8da; border-color: #7eb8da; }
+.tag-btn:hover { border-color: #7eb8da; }
+
+#dup-picker { background: #2a2a1a; border: 1px solid #ffd54f; border-radius: 4px; padding: 10px; margin-top: 10px; display: none; }
+#dup-picker.open { display: block; }
+#dup-picker select { background: #16213e; color: #e0e0e0; border: 1px solid #555; padding: 4px 8px; border-radius: 3px; font-size: 12px; width: 100%; margin: 6px 0; }
+#dup-picker .dup-actions { margin-top: 6px; display: flex; gap: 6px; }
+#dup-picker .dup-actions button { padding: 4px 12px; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
+#dup-picker .dup-confirm { background: #4a3800; color: #ffd54f; }
+#dup-picker .dup-cancel { background: #333; color: #e0e0e0; }
 
 #conv-pane { flex: 2; overflow-y: auto; padding: 0; background: #111; }
 .conv-event { padding: 8px 16px; border-bottom: 1px solid #1a1a2e; }
@@ -249,9 +264,11 @@ kbd { background: #333; padding: 1px 5px; border-radius: 3px; font-size: 11px; b
     <button class="label-btn btn-tp" onclick="labelCurrent('tp')">TP (t)</button>
     <button class="label-btn btn-fp" onclick="labelCurrent('fp')">FP (f)</button>
     <button class="label-btn btn-skip" onclick="labelCurrent('skip')">Skip (s)</button>
+    <button class="label-btn btn-dup" onclick="startDup()">Dup (d)</button>
     <span id="current-label"></span>
     <span class="stats" id="stats"></span>
-    <span id="shortcuts"><kbd>t</kbd> tp  <kbd>f</kbd> fp  <kbd>s</kbd> skip  <kbd>&larr;</kbd><kbd>&rarr;</kbd> nav</span>
+    <span id="run-dir" style="color:#7eb8da;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:400px" title=""></span>
+    <span id="shortcuts"><kbd>t</kbd> tp  <kbd>f</kbd> fp  <kbd>s</kbd> skip  <kbd>d</kbd> dup  <kbd>&larr;</kbd><kbd>&rarr;</kbd> nav</span>
 </div>
 
 <div id="main">
@@ -286,12 +303,22 @@ kbd { background: #333; padding: 1px 5px; border-radius: 3px; font-size: 11px; b
 let hunches = [];
 let labels = {};
 let currentIdx = 0;
+const KNOWN_TAGS = ['not_novel', 'borderline', 'interesting'];
 
 async function init() {
-    const resp = await fetch('/api/hunches');
+    const [resp, cfgResp] = await Promise.all([
+        fetch('/api/hunches'),
+        fetch('/api/config'),
+    ]);
     const data = await resp.json();
     hunches = data.hunches;
     labels = data.labels;
+
+    const cfg = await cfgResp.json();
+    const rdEl = document.getElementById('run-dir');
+    rdEl.textContent = cfg.run_dir;
+    rdEl.title = cfg.run_dir;
+
     renderList();
     if (hunches.length > 0) selectHunch(0);
     updateStats();
@@ -303,11 +330,17 @@ function renderList() {
         const lbl = labels[h.hunch_id];
         let badge = '';
         if (lbl) {
-            const cls = 'badge-' + lbl.label;
-            badge = `<span class="label-badge ${cls}">${lbl.label.toUpperCase()}</span>`;
+            if (lbl.duplicate_of) {
+                badge = `<span class="label-badge badge-dup">DUP</span>`;
+            } else {
+                const cls = 'badge-' + lbl.label;
+                badge = `<span class="label-badge ${cls}">${lbl.label.toUpperCase()}</span>`;
+            }
+            const tags = lbl.tags || [];
+            if (tags.length) badge += `<span style="color:#7eb8da;font-size:9px;margin-left:2px">${tags.map(t=>t.replace(/_/g,' ')).join(', ')}</span>`;
         }
         return `<div class="hunch-item ${i === currentIdx ? 'active' : ''}" onclick="selectHunch(${i})" title="${esc(h.smell)}">
-            <span class="hid">${h.hunch_id}</span>${badge}
+            <span class="hid">${h.hunch_id}</span><span>${badge}</span>
         </div>`;
     }).join('');
 }
@@ -355,12 +388,23 @@ function renderDetail(h) {
         <div class="description">${esc(h.description)}</div>
         <div class="refs">Refs: ${chunkLinks}<br>Artifacts: ${artLinks}</div>
         <div id="note-section">
+            <label>Tags:</label>
+            <div id="tag-toggles" style="margin:4px 0 8px">${renderTagButtons(lbl)}</div>
             <label>Category:</label>
             <input type="text" id="category-input" value="${esc((lbl && lbl.category) || '')}"
                    onchange="updateMeta()" placeholder="e.g. confound, measurement, contradiction">
             <label style="margin-top:8px;display:block">Note:</label>
             <input type="text" id="note-input" value="${esc((lbl && lbl.note) || '')}"
                    onchange="updateMeta()" placeholder="free text, stays local">
+            ${lbl && lbl.duplicate_of ? `<div style="margin-top:8px;color:#ffd54f;font-size:12px">Duplicate of <a href="#" class="artifact-link" style="color:#ffd54f" onclick="goToHunch('${esc(lbl.duplicate_of)}'); return false;">${esc(lbl.duplicate_of)}</a></div>` : ''}
+            <div id="dup-picker">
+                <label style="color:#ffd54f;font-size:12px;font-weight:bold">Mark as duplicate of:</label>
+                <select id="dup-target"></select>
+                <div class="dup-actions">
+                    <button class="dup-confirm" onclick="confirmDup()">Confirm</button>
+                    <button class="dup-cancel" onclick="cancelDup()">Cancel (Esc)</button>
+                </div>
+            </div>
         </div>
     `;
 }
@@ -418,10 +462,11 @@ async function labelCurrent(label) {
     if (!h) return;
     const cat = document.getElementById('category-input')?.value || '';
     const note = document.getElementById('note-input')?.value || '';
+    const tags = getCurrentTags();
     await fetch(`/api/hunch/${h.hunch_id}/label`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ label, category: cat, note }),
+        body: JSON.stringify({ label, category: cat, note, tags }),
     });
     const resp = await fetch('/api/hunches');
     const data = await resp.json();
@@ -438,13 +483,96 @@ async function updateMeta() {
     if (!lbl) return;
     const cat = document.getElementById('category-input')?.value || '';
     const note = document.getElementById('note-input')?.value || '';
+    const tags = getCurrentTags();
     await fetch(`/api/hunch/${h.hunch_id}/label`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ label: lbl.label, category: cat, note }),
+        body: JSON.stringify({ label: lbl.label, category: cat, note, tags }),
     });
     const resp = await fetch('/api/hunches');
     labels = (await resp.json()).labels;
+}
+
+function renderTagButtons(lbl) {
+    const activeTags = (lbl && lbl.tags) || [];
+    return KNOWN_TAGS.map(tag => {
+        const active = activeTags.includes(tag);
+        const display = tag.replace(/_/g, ' ');
+        return `<button class="tag-btn ${active ? 'active' : ''}" onclick="toggleTag('${tag}')">${display}</button>`;
+    }).join('');
+}
+
+function getCurrentTags() {
+    const lbl = labels[hunches[currentIdx]?.hunch_id];
+    return (lbl && lbl.tags) || [];
+}
+
+async function toggleTag(tag) {
+    const h = hunches[currentIdx];
+    if (!h) return;
+    const lbl = labels[h.hunch_id];
+    if (!lbl) return;
+    const tags = [...getCurrentTags()];
+    const idx = tags.indexOf(tag);
+    if (idx >= 0) tags.splice(idx, 1);
+    else tags.push(tag);
+    await fetch(`/api/hunch/${h.hunch_id}/label`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ label: lbl.label, category: lbl.category || '', note: lbl.note || '', tags }),
+    });
+    const resp = await fetch('/api/hunches');
+    labels = (await resp.json()).labels;
+    document.getElementById('tag-toggles').innerHTML = renderTagButtons(labels[h.hunch_id]);
+}
+
+function goToHunch(hunchId) {
+    const idx = hunches.findIndex(h => h.hunch_id === hunchId);
+    if (idx >= 0) selectHunch(idx);
+}
+
+function startDup() {
+    const h = hunches[currentIdx];
+    if (!h) return;
+    const picker = document.getElementById('dup-picker');
+    const select = document.getElementById('dup-target');
+    const options = hunches
+        .filter(o => o.hunch_id !== h.hunch_id)
+        .map(o => {
+            const oLbl = labels[o.hunch_id];
+            const lblTag = oLbl ? ` [${oLbl.label.toUpperCase()}]` : '';
+            return `<option value="${o.hunch_id}">${o.hunch_id}${lblTag} — ${esc(o.smell.substring(0, 80))}</option>`;
+        });
+    select.innerHTML = options.join('');
+    picker.classList.add('open');
+    select.focus();
+}
+
+function cancelDup() {
+    document.getElementById('dup-picker').classList.remove('open');
+}
+
+async function confirmDup() {
+    const h = hunches[currentIdx];
+    if (!h) return;
+    const targetId = document.getElementById('dup-target').value;
+    if (!targetId) return;
+    const targetLabel = labels[targetId];
+    const inheritedLabel = (targetLabel && targetLabel.label) || 'skip';
+    const cat = document.getElementById('category-input')?.value || '';
+    const note = document.getElementById('note-input')?.value || '';
+    const tags = getCurrentTags();
+    await fetch(`/api/hunch/${h.hunch_id}/label`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ label: inheritedLabel, category: cat, note, tags, duplicate_of: targetId }),
+    });
+    const resp = await fetch('/api/hunches');
+    labels = (await resp.json()).labels;
+    document.getElementById('dup-picker').classList.remove('open');
+    renderList();
+    renderDetail(h);
+    updateStats();
 }
 
 function updateStats() {
@@ -535,12 +663,18 @@ document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') closeArtifact();
         return;
     }
-    if (e.target.tagName === 'INPUT') return;
+    if (document.getElementById('dup-picker').classList.contains('open')) {
+        if (e.key === 'Escape') cancelDup();
+        else if (e.key === 'Enter') confirmDup();
+        return;
+    }
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
     if (e.key === 'ArrowRight') nextHunch();
     else if (e.key === 'ArrowLeft') prevHunch();
     else if (e.key === 't') labelCurrent('tp');
     else if (e.key === 'f') labelCurrent('fp');
     else if (e.key === 's') labelCurrent('skip');
+    else if (e.key === 'd') startDup();
 });
 
 init();
@@ -595,6 +729,13 @@ def create_app(
     @app.route("/")
     def index():
         return HTML_PAGE
+
+    @app.route("/api/config")
+    def api_config():
+        return jsonify({
+            "run_dir": str(run_dir.resolve()),
+            "replay_dir": str(replay_dir.resolve()),
+        })
 
     @app.route("/api/hunches")
     def api_hunches():
@@ -668,16 +809,24 @@ def create_app(
         if label not in ("tp", "fp", "skip"):
             return jsonify({"error": "invalid label"}), 400
 
+        tags = data.get("tags", [])
+        if not isinstance(tags, list):
+            tags = []
+        duplicate_of = data.get("duplicate_of") or None
         ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        _write_label(labels_path, {
+        record = {
             "hunch_id": hunch_id,
             "label": label,
             "category": data.get("category", ""),
             "source": "evaluator",
             "bank_match": None,
             "note": data.get("note", ""),
+            "tags": tags,
             "ts": ts,
-        })
+        }
+        if duplicate_of:
+            record["duplicate_of"] = duplicate_of
+        _write_label(labels_path, record)
         return jsonify({"ok": True})
 
     return app
