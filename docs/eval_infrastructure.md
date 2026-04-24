@@ -184,7 +184,9 @@ Starts a local server and opens a browser-based two-pane UI:
 
 **Navigation:** Previous/next buttons (or keyboard shortcuts) to move between hunches. Already-labeled hunches show their label but can be re-labeled.
 
-**Labeling:** TP / FP / Skip buttons. Writes immediately to `labels.jsonl`. Optional fields for category tag and free-text note.
+**Labeling:** TP / FP / Skip buttons. Writes immediately to `labels.jsonl`. Optional tags (not_novel, borderline, interesting) for structured metadata. Free-text note field.
+
+**Duplicates:** Press 'd' to mark a hunch as a duplicate of an earlier one. A dropdown shows all prior hunches; selecting the original inherits its label and adds a `duplicate_of` field to `labels.jsonl`. Duplicates display a DUP badge in the sidebar.
 
 **Artifact reconstruction:** For each hunch, the UI reconstructs the state of referenced `.md` artifacts at `bookmark_now` by replaying `artifact_write` and `artifact_edit` events from the replay buffer up to that `tick_seq`.
 
