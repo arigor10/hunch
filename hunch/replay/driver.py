@@ -16,6 +16,7 @@ Not a CLI on its own — wired up through `hunch replay-offline`.
 from __future__ import annotations
 
 import datetime as _dt
+import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -90,6 +91,7 @@ def run_replay(
     max_events: int | None = None,
     hunch_filter: HunchFilter | None = None,
     output_dir: Path | None = None,
+    min_tick_interval_s: float = 0.0,
 ) -> ReplayResult:
     """Drive a Critic through a pre-parsed event stream.
 
@@ -124,6 +126,7 @@ def run_replay(
       on_log: optional log sink; called once per tick / purge / warning.
       max_events: cap on events consumed (for smoke tests / partial runs).
       output_dir: if set, write hunches.jsonl here instead of replay_dir.
+      min_tick_interval_s: minimum wall-clock seconds between ticks.
 
     Returns a `ReplayResult` summarizing the run.
     """
@@ -150,6 +153,7 @@ def run_replay(
         max_events=max_events,
         hunch_filter=hunch_filter,
         output_dir=output_dir,
+        min_tick_interval_s=min_tick_interval_s,
     )
 
     # Clean up eval checkpoint — run_replay is one-shot; callers that
@@ -174,6 +178,7 @@ def run_replay_from_claude_log(
     max_events: int | None = None,
     hunch_filter: HunchFilter | None = None,
     output_dir: Path | None = None,
+    min_tick_interval_s: float = 0.0,
 ) -> ReplayResult:
     """Parse a Claude Code `.jsonl` transcript and drive a replay from it."""
     events, project_roots = parse_whole_file(claude_log)
@@ -188,6 +193,7 @@ def run_replay_from_claude_log(
         max_events=max_events,
         hunch_filter=hunch_filter,
         output_dir=output_dir,
+        min_tick_interval_s=min_tick_interval_s,
     )
 
 
@@ -205,6 +211,7 @@ def run_replay_from_dir(
     overwrite_hunches: bool = False,
     hunch_filter: HunchFilter | None = None,
     output_dir: Path | None = None,
+    min_tick_interval_s: float = 0.0,
 ) -> ReplayResult:
     """Drive a Critic over an already-populated replay buffer.
 
@@ -226,6 +233,9 @@ def run_replay_from_dir(
         starting. Default False — refuses if a populated hunches.jsonl is
         already present, so a bad re-run doesn't silently duplicate.
       output_dir: if set, write hunches.jsonl here instead of replay_dir.
+      min_tick_interval_s: minimum wall-clock seconds between ticks.
+        If a tick finishes faster, the driver sleeps the remainder.
+        Useful for rate-limiting API calls on quota-limited accounts.
 
     Returns a `ReplayResult` summarizing the run.
     """
@@ -283,6 +293,7 @@ def run_replay_from_dir(
         hunch_filter=hunch_filter,
         result=result,
         on_log=on_log,
+        min_tick_interval_s=min_tick_interval_s,
     )
 
     absolute_index = start_index
@@ -346,6 +357,7 @@ class _Ctx:
     hunch_filter: HunchFilter | None
     result: ReplayResult
     on_log: Callable[[str], None] | None
+    min_tick_interval_s: float = 0.0
 
 
 def _drive_one_event(
@@ -412,6 +424,7 @@ def _fire_tick(
     tick_id = f"t-{ctx.tick_counter:04d}"
     bookmark_prev = state.last_tick_bookmark
     state = mark_tick_started_v1(state, now, bookmark_now)
+    t0 = _time.monotonic()
     try:
         hunches = ctx.critic.tick(
             tick_id=tick_id,
@@ -420,6 +433,7 @@ def _fire_tick(
         )
     finally:
         state = mark_tick_finished_v1(state)
+    elapsed = _time.monotonic() - t0
 
     ctx.result.ticks_fired += 1
     emitted = _persist_hunches(
@@ -435,13 +449,22 @@ def _fire_tick(
         "bookmark_prev": bookmark_prev,
         "bookmark_now": bookmark_now,
         "hunch_count": len(hunches),
+        "elapsed_s": round(elapsed, 1),
     })
     if ctx.on_log is not None:
         ctx.on_log(
             f"[replay] {tick_id} @ event {event_index} "
             f"(bookmark {bookmark_prev}→{bookmark_now}) "
-            f"hunches={len(hunches)}"
+            f"hunches={len(hunches)} ({elapsed:.1f}s)"
         )
+
+    if ctx.min_tick_interval_s > 0:
+        sleep_s = ctx.min_tick_interval_s - elapsed
+        if sleep_s > 0:
+            if ctx.on_log is not None:
+                ctx.on_log(f"[rate-limit] sleeping {sleep_s:.0f}s")
+            _time.sleep(sleep_s)
+
     return state
 
 

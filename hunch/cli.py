@@ -182,6 +182,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="disable the post-critic novelty + dedup filter",
     )
+    rpo.add_argument(
+        "--min-tick-interval-s",
+        type=float,
+        default=0.0,
+        help="minimum wall-clock seconds between ticks (rate limiter). "
+        "If a tick finishes faster, the driver sleeps the remainder. "
+        "Useful for staying within API quota limits.",
+    )
 
     aweb = sub.add_parser(
         "annotate-web",
@@ -377,11 +385,13 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
     trigger_cfg = TriggerV1Config(min_debounce_s=ns.min_debounce_s)
     try:
         if ns.claude_log is not None:
+            rate_msg = f"  rate-limit={ns.min_tick_interval_s}s" if ns.min_tick_interval_s > 0 else ""
             _log(
                 f"hunch replay-offline: parse {ns.claude_log} → "
                 f"{replay_dir}  critic={ns.critic}"
                 f"  debounce={ns.min_debounce_s}s"
                 f"  filter={'on' if filter_enabled else 'off'}"
+                f"{rate_msg}"
                 f"\n  output → {output_dir}"
             )
             result = run_replay_from_claude_log(
@@ -393,12 +403,15 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
                 max_events=ns.max_events,
                 hunch_filter=hunch_filter,
                 output_dir=output_dir,
+                min_tick_interval_s=ns.min_tick_interval_s,
             )
         else:
+            rate_msg = f"  rate-limit={ns.min_tick_interval_s}s" if ns.min_tick_interval_s > 0 else ""
             _log(
                 f"hunch replay-offline: from-dir {replay_dir}"
                 f"  critic={ns.critic}  debounce={ns.min_debounce_s}s"
                 f"  filter={'on' if filter_enabled else 'off'}"
+                f"{rate_msg}"
                 f"\n  output → {output_dir}"
             )
             result = run_replay_from_dir(
@@ -409,6 +422,7 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
                 max_events=ns.max_events,
                 hunch_filter=hunch_filter,
                 output_dir=output_dir,
+                min_tick_interval_s=ns.min_tick_interval_s,
             )
     except (RuntimeError, FileNotFoundError) as e:
         sys.stderr.write(f"hunch replay-offline: {e}\n")
