@@ -27,12 +27,7 @@ from hunch.trigger import TriggerV1Config
 
 # Zeroed-out trigger config for tests: fires on every claude_stopped
 # event (turn-end mode) with no debounce requirements.
-_TEST_TRIGGER = TriggerV1Config(
-    silence_s=0.0,
-    min_debounce_s=0.0,
-    max_interval_s=1e9,
-    fire_on_turn_end=True,
-)
+_TEST_TRIGGER = TriggerV1Config(min_debounce_s=0.0)
 
 
 # ---------------------------------------------------------------------------

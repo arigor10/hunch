@@ -35,13 +35,20 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hunch.capture.writer import ReplayBufferWriter
+from hunch.checkpoint import (
+    CHECKPOINT_FILENAME,
+    checkpoint_from_trigger_state,
+    read_checkpoint,
+    trigger_state_from_checkpoint,
+    write_checkpoint,
+)
 from hunch.critic import Critic
 from hunch.critic.stub import StubCritic
-from hunch.journal.hunches import HunchesWriter
+from hunch.filter import HunchFilter
+from hunch.journal.hunches import HunchesWriter, read_current_hunches
 from hunch.parse import ParserState
 from hunch.parse.transcript import poll_new_events
 from hunch.trigger import (
-    FIRE_EXCLUSIVE,
     TriggerV1Config,
     TriggerV1State,
     decide_tick_v1,
@@ -112,12 +119,10 @@ class RunConfig:
     project_roots: list[str] = field(default_factory=list)
     poll_s: float = 1.0
     critic_factory: Callable[[], Critic] = StubCritic
+    filter_enabled: bool = True
+    anthropic_client: Any | None = None
     trigger_config: TriggerV1Config = field(
-        default_factory=lambda: TriggerV1Config(
-            silence_s=300.0,
-            min_debounce_s=300.0,
-            fire_on_turn_end=True,
-        )
+        default_factory=lambda: TriggerV1Config(min_debounce_s=300.0)
     )
 
     def resolved_replay_dir(self) -> Path:
@@ -141,6 +146,7 @@ class Runner:
     writer: ReplayBufferWriter = field(init=False)
     hunches_writer: HunchesWriter = field(init=False)
     critic: Critic = field(init=False)
+    hunch_filter: HunchFilter = field(init=False)
     parser_state: ParserState = field(init=False)
     transcript_path: Path = field(init=False)
     trigger_state: TriggerV1State = field(init=False)
@@ -148,6 +154,8 @@ class Runner:
     _stopped: bool = False
     _tick_counter: int = 0
     _hook_bookmark: int = 0
+    _hunches_emitted: int = 0
+    _checkpoint_path: Path | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         cfg = self.config
@@ -170,8 +178,45 @@ class Runner:
         self.critic = cfg.critic_factory()
         self.critic.init({"replay_dir": str(replay_dir)})
 
+        self.hunch_filter = HunchFilter(
+            replay_dir=replay_dir,
+            client=cfg.anthropic_client,
+            enabled=cfg.filter_enabled,
+            log=self.log,
+        )
+        existing = read_current_hunches(replay_dir / "hunches.jsonl")
+        self.hunch_filter.init_from_existing(existing)
+
         self.trigger_state = TriggerV1State()
         self._hook_bookmark = self.writer.tick_seq
+
+        self._checkpoint_path = replay_dir / CHECKPOINT_FILENAME
+        cp = read_checkpoint(self._checkpoint_path)
+        if cp is not None:
+            self.parser_state = ParserState(
+                line_offset=cp.parser_line_offset,
+                project_roots=cfg.resolved_project_roots(),
+            )
+            # Derive tick_seq from the actual file rather than the
+            # checkpoint value: if a crash happened between writing
+            # events and checkpointing, the file has more lines than
+            # the checkpoint knows about.  Counting is cheap and
+            # prevents tick_seq collisions on resume.
+            conv_path = replay_dir / "conversation.jsonl"
+            if conv_path.exists():
+                with open(conv_path) as f:
+                    self.writer.tick_seq = sum(1 for _ in f)
+            self.trigger_state = trigger_state_from_checkpoint(cp)
+            self._tick_counter = cp.tick_counter
+            self._hook_bookmark = max(cp.hook_bookmark, self.writer.tick_seq)
+            self._hunches_emitted = cp.hunches_emitted
+            if self.log is not None:
+                self.log(
+                    f"[resume] from checkpoint: "
+                    f"parser_offset={cp.parser_line_offset} "
+                    f"writer_seq={self.writer.tick_seq} "
+                    f"ticks={cp.tick_counter}"
+                )
 
     # ------------------------------------------------------------------
     # Main loop
@@ -179,7 +224,14 @@ class Runner:
 
     def step_once(self) -> None:
         """One iteration: capture new events, evaluate trigger per event,
-        then check for hook-injected claude_stopped events."""
+        then check for hook-injected claude_stopped events.
+
+        Ingestion and evaluation are separated: all new events are
+        written to the replay buffer first (fast, no critic calls),
+        then the trigger is evaluated for each event.  This ensures
+        the replay buffer is complete before any critic tick fires,
+        so the critic always sees full context.
+        """
         events, new_parser_state = poll_new_events(
             self.transcript_path, self.parser_state,
         )
@@ -187,19 +239,22 @@ class Runner:
 
         if not events:
             self._check_hook_events()
+            self._write_checkpoint()
             return
 
         project_roots = self.parser_state.project_roots
         tick_seq_before = self.writer.tick_seq
 
+        # Phase 1: Write all events to the replay buffer (fast).
+        bookmarks: list[int] = []
         for event in events:
+            self.writer.append_events([event], project_roots)
+            bookmarks.append(self.writer.tick_seq)
+
+        # Phase 2: Evaluate trigger for each event (may call critic).
+        for event, bookmark_now in zip(events, bookmarks):
             etype = event.get("type", "")
 
-            # Write one event to the replay buffer.
-            self.writer.append_events([event], project_roots)
-            bookmark_now = self.writer.tick_seq
-
-            # Evaluate trigger with the current event's type.
             now = time.monotonic()
             fire = decide_tick_v1(
                 self.trigger_state,
@@ -210,13 +265,7 @@ class Runner:
             )
 
             if fire is not None:
-                effective_bookmark = bookmark_now
-                if (
-                    fire == FIRE_EXCLUSIVE
-                    and bookmark_now > self.trigger_state.last_tick_bookmark + 1
-                ):
-                    effective_bookmark = bookmark_now - 1
-                self._fire_tick(now, effective_bookmark)
+                self._fire_tick(now, bookmark_now)
 
             self.trigger_state = observe_event_v1(
                 self.trigger_state, etype, now,
@@ -230,6 +279,7 @@ class Runner:
             )
 
         self._check_hook_events()
+        self._write_checkpoint()
 
     def run_forever(self) -> None:
         """Blocking loop until SIGINT/SIGTERM or `stop()`."""
@@ -300,6 +350,24 @@ class Runner:
             )
 
     # ------------------------------------------------------------------
+    # Checkpoint
+    # ------------------------------------------------------------------
+
+    def _write_checkpoint(self) -> None:
+        if self._checkpoint_path is None:
+            return
+        cp = checkpoint_from_trigger_state(
+            self.trigger_state,
+            ticks_fired=self._tick_counter,
+            hunches_emitted=self._hunches_emitted,
+            tick_counter=self._tick_counter,
+            parser_line_offset=self.parser_state.line_offset,
+            writer_tick_seq=self.writer.tick_seq,
+            hook_bookmark=self._hook_bookmark,
+        )
+        write_checkpoint(self._checkpoint_path, cp)
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
@@ -334,19 +402,39 @@ class Runner:
                 f"[tick {tick_id}] {len(hunches)} hunch(es) emitted "
                 f"({elapsed:.1f}s)"
             )
-        for hunch in hunches:
+        filter_results = self.hunch_filter.filter_batch(
+            hunches, bookmark_prev, bookmark_now,
+        )
+        for fr in filter_results:
             hid = self.hunches_writer.allocate_id()
-            self.hunches_writer.write_emit(
-                hunch=hunch,
-                hunch_id=hid,
-                ts=ts,
-                emitted_by_tick=self._tick_counter,
-                bookmark_prev=bookmark_prev,
-                bookmark_now=bookmark_now,
-            )
-            if self.log is not None:
-                smell = getattr(hunch, "smell", "<no smell>")
-                self.log(f"  - {hid} {smell}")
+            if fr.passed:
+                self.hunches_writer.write_emit(
+                    hunch=fr.hunch,
+                    hunch_id=hid,
+                    ts=ts,
+                    emitted_by_tick=self._tick_counter,
+                    bookmark_prev=bookmark_prev,
+                    bookmark_now=bookmark_now,
+                )
+                self._hunches_emitted += 1
+                if self.log is not None:
+                    self.log(f"  - {hid} {fr.hunch.smell}")
+            else:
+                self.hunches_writer.write_filtered(
+                    hunch=fr.hunch,
+                    hunch_id=hid,
+                    ts=ts,
+                    emitted_by_tick=self._tick_counter,
+                    bookmark_prev=bookmark_prev,
+                    bookmark_now=bookmark_now,
+                    filter_type=fr.filter_type,
+                    filter_reason=fr.reason,
+                )
+                if self.log is not None:
+                    self.log(
+                        f"  - {hid} [filtered:{fr.filter_type}] "
+                        f"{fr.hunch.smell}"
+                    )
 
     def _install_signal_handlers(self) -> None:
         def _handler(signum, frame):  # noqa: ARG001 — signal API

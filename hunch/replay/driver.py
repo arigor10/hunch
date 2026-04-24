@@ -21,7 +21,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hunch.capture.writer import ReplayBufferWriter
+from hunch.checkpoint import (
+    CHECKPOINT_FILENAME,
+    checkpoint_from_trigger_state,
+    read_checkpoint,
+    trigger_state_from_checkpoint,
+    write_checkpoint,
+)
 from hunch.critic.protocol import Critic, Hunch
+from hunch.filter import HunchFilter
 from hunch.journal.hunches import HunchesWriter
 from hunch.parse.transcript import Event, parse_whole_file
 from hunch.replay.loader import load_trigger_events, synthesize_claude_stopped
@@ -62,7 +70,6 @@ def _parse_ts(ts: str) -> float | None:
 class ReplayResult:
     events_consumed: int = 0
     ticks_fired: int = 0
-    virtual_ticks_fired: int = 0
     hunches_emitted: int = 0
     tick_log: list[dict[str, Any]] = field(default_factory=list)
     backward_ts_warnings: int = 0
@@ -81,11 +88,20 @@ def run_replay(
     critic_config: dict[str, Any] | None = None,
     on_log: Callable[[str], None] | None = None,
     max_events: int | None = None,
-    allow_existing: bool = False,
-    skip_virtual_ticks: bool = False,
+    hunch_filter: HunchFilter | None = None,
+    output_dir: Path | None = None,
 ) -> ReplayResult:
-    """Drive a Critic through a pre-parsed event stream, writing a
-    fresh replay buffer as we go.
+    """Drive a Critic through a pre-parsed event stream.
+
+    Two-phase operation:
+      1. **Ingest** — write all events to the replay buffer (fast, no
+         critic calls). Produces conversation.jsonl, artifacts.jsonl,
+         and artifact snapshots.
+      2. **Evaluate** — drive the critic over the populated replay
+         buffer via `run_replay_from_dir`.
+
+    This separation ensures the replay buffer is complete before the
+    first critic call, so the critic always sees full context.
 
     Most callers should prefer `run_replay_from_claude_log` (parses a
     raw Claude .jsonl first) or `run_replay_from_dir` (drives over an
@@ -98,104 +114,48 @@ def run_replay(
       project_roots: absolute paths to the project root(s), for
         artifact path normalization in the replay buffer.
       replay_dir: output directory. Populated with conversation.jsonl,
-        artifacts.jsonl, artifacts/, and hunches.jsonl — same layout
-        as a live `hunch run` produces.
+        artifacts.jsonl, artifacts/ — same layout as a live `hunch run`
+        produces. Must be empty (refuses if it already contains data
+        from a prior run).
       critic: any `Critic` protocol implementation (stub, sonnet, …).
       trigger_config: v1 trigger knobs. Default = production cadence.
       critic_config: extra config passed to `critic.init()`. `replay_dir`
         is always injected automatically.
       on_log: optional log sink; called once per tick / purge / warning.
       max_events: cap on events consumed (for smoke tests / partial runs).
-      allow_existing: if False (default), refuse when `replay_dir` already
-        contains buffer data from a prior run. Appending to an existing
-        buffer silently doubles events and collides hunch ids.
+      output_dir: if set, write hunches.jsonl here instead of replay_dir.
 
     Returns a `ReplayResult` summarizing the run.
     """
-    cfg = trigger_config or TriggerV1Config()
     replay_dir = Path(replay_dir)
     replay_dir.mkdir(parents=True, exist_ok=True)
-    _check_replay_dir_empty(replay_dir, allow_existing)
+    _check_replay_dir_empty(replay_dir)
 
+    # Phase 1: Ingest all events into the replay buffer.
     writer = ReplayBufferWriter(replay_dir=replay_dir)
+    for event in events:
+        writer.append_events([event], project_roots)
+    writer.conversation_path.touch(exist_ok=True)
 
-    init_config = {"replay_dir": str(replay_dir), **(critic_config or {})}
-    critic.init(init_config)
-    hunches_writer = HunchesWriter(hunches_path=replay_dir / "hunches.jsonl")
+    if on_log is not None:
+        on_log(f"[replay] ingested {len(events)} events into {replay_dir}")
 
-    state = TriggerV1State()
-    result = ReplayResult()
-    ctx = _Ctx(
-        tick_counter=0,
+    # Phase 2: Evaluate via the from-dir driver.
+    result = run_replay_from_dir(
+        replay_dir=replay_dir,
         critic=critic,
-        hunches_writer=hunches_writer,
-        result=result,
+        trigger_config=trigger_config,
+        critic_config=critic_config,
         on_log=on_log,
+        max_events=max_events,
+        hunch_filter=hunch_filter,
+        output_dir=output_dir,
     )
-    last_sim_now = 0.0
 
-    def log(msg: str) -> None:
-        if on_log is not None:
-            on_log(msg)
-
-    # Events are assumed pre-sorted by caller convention. `parse_whole_file`
-    # returns events in file-order (monotonic for a single Claude session).
-    # Non-monotonic jumps are handled downstream by clamping sim_now.
-    _ASSISTANT_TYPES = frozenset({
-        "assistant_text", "artifact_write", "artifact_edit", "figure",
-    })
-    last_etype = ""
-    try:
-        for i, event in enumerate(events):
-            if max_events is not None and i >= max_events:
-                break
-            etype = event.get("type", "")
-            ts_raw = event.get("timestamp", "")
-            bookmark_pre_event = writer.tick_seq
-
-            # In turn-end mode, synthesize a claude_stopped event at
-            # speaker boundaries (assistant → user) so the trigger fires
-            # before the user's message is written. Same logic as the
-            # loader's synthesize_claude_stopped, but inline here because
-            # events don't have tick_seq yet.
-            if (
-                cfg.fire_on_turn_end
-                and etype == "user_text"
-                and last_etype in _ASSISTANT_TYPES
-            ):
-                state, last_sim_now = _drive_one_event(
-                    ctx=ctx,
-                    state=state,
-                    cfg=cfg,
-                    event_index=i,
-                    etype="claude_stopped",
-                    ts_raw=ts_raw,
-                    bookmark_pre_event=bookmark_pre_event,
-                    bookmark_now=bookmark_pre_event,
-                    last_sim_now=last_sim_now,
-                    skip_virtual_ticks=skip_virtual_ticks,
-                )
-
-            # Write first so that bookmark_now reflects the event
-            # that's about to be considered for triggering.
-            writer.append_events([event], project_roots)
-            bookmark_now = writer.tick_seq
-
-            state, last_sim_now = _drive_one_event(
-                ctx=ctx,
-                state=state,
-                cfg=cfg,
-                event_index=i,
-                etype=etype,
-                ts_raw=ts_raw,
-                bookmark_pre_event=bookmark_pre_event,
-                bookmark_now=bookmark_now,
-                last_sim_now=last_sim_now,
-                skip_virtual_ticks=skip_virtual_ticks,
-            )
-            last_etype = etype
-    finally:
-        critic.shutdown()
+    # Clean up eval checkpoint — run_replay is one-shot; callers that
+    # need resume use run_replay_from_dir directly.
+    cp_dir = Path(output_dir) if output_dir is not None else replay_dir
+    (cp_dir / CHECKPOINT_FILENAME).unlink(missing_ok=True)
 
     return result
 
@@ -212,7 +172,8 @@ def run_replay_from_claude_log(
     critic_config: dict[str, Any] | None = None,
     on_log: Callable[[str], None] | None = None,
     max_events: int | None = None,
-    allow_existing: bool = False,
+    hunch_filter: HunchFilter | None = None,
+    output_dir: Path | None = None,
 ) -> ReplayResult:
     """Parse a Claude Code `.jsonl` transcript and drive a replay from it."""
     events, project_roots = parse_whole_file(claude_log)
@@ -225,7 +186,8 @@ def run_replay_from_claude_log(
         critic_config=critic_config,
         on_log=on_log,
         max_events=max_events,
-        allow_existing=allow_existing,
+        hunch_filter=hunch_filter,
+        output_dir=output_dir,
     )
 
 
@@ -241,14 +203,16 @@ def run_replay_from_dir(
     on_log: Callable[[str], None] | None = None,
     max_events: int | None = None,
     overwrite_hunches: bool = False,
-    skip_virtual_ticks: bool = False,
+    hunch_filter: HunchFilter | None = None,
+    output_dir: Path | None = None,
 ) -> ReplayResult:
     """Drive a Critic over an already-populated replay buffer.
 
     Read-only on conversation.jsonl / artifacts.jsonl / artifacts/. The
     replay buffer is whatever the live framework (or a one-shot parser
     like `scripts/parse_transcript.py`) produced — the driver here only
-    reads it and appends hunches.jsonl alongside.
+    reads it and writes hunches.jsonl to output_dir (or replay_dir if
+    output_dir is not set).
 
     Args:
       replay_dir: an existing `.hunch/replay/`-style directory.
@@ -261,6 +225,7 @@ def run_replay_from_dir(
       overwrite_hunches: if True, delete any existing hunches.jsonl before
         starting. Default False — refuses if a populated hunches.jsonl is
         already present, so a bad re-run doesn't silently duplicate.
+      output_dir: if set, write hunches.jsonl here instead of replay_dir.
 
     Returns a `ReplayResult` summarizing the run.
     """
@@ -268,44 +233,67 @@ def run_replay_from_dir(
     replay_dir = Path(replay_dir)
 
     trigger_events = load_trigger_events(replay_dir)
-    if cfg.fire_on_turn_end:
-        trigger_events = synthesize_claude_stopped(trigger_events)
+    trigger_events = synthesize_claude_stopped(trigger_events)
 
-    hunches_path = replay_dir / "hunches.jsonl"
-    if hunches_path.exists() and hunches_path.stat().st_size > 0:
+    hunches_dir = Path(output_dir) if output_dir is not None else replay_dir
+    hunches_dir.mkdir(parents=True, exist_ok=True)
+    hunches_path = hunches_dir / "hunches.jsonl"
+
+    cp_path = hunches_dir / CHECKPOINT_FILENAME
+    cp = read_checkpoint(cp_path)
+
+    start_index = 0
+    state = TriggerV1State()
+    result = ReplayResult()
+    last_sim_now = 0.0
+    bookmark_pre_event = 0
+    tick_counter_init = 0
+
+    if cp is not None:
+        start_index = cp.events_consumed
+        state = trigger_state_from_checkpoint(cp)
+        result.ticks_fired = cp.ticks_fired
+        result.hunches_emitted = cp.hunches_emitted
+        tick_counter_init = cp.tick_counter
+        last_sim_now = cp.last_sim_now
+        bookmark_pre_event = cp.bookmark_pre_event
+        if on_log:
+            on_log(
+                f"[replay] resuming from checkpoint: "
+                f"events={cp.events_consumed} ticks={cp.ticks_fired}"
+            )
+    elif hunches_path.exists() and hunches_path.stat().st_size > 0:
         if overwrite_hunches:
             hunches_path.unlink()
         else:
             raise RuntimeError(
-                f"{hunches_path} already exists and is non-empty; "
-                "pass overwrite_hunches=True to replace it."
+                f"{hunches_path} already exists and is non-empty, "
+                f"but no checkpoint.json found for resume. "
+                f"To start fresh, delete it:  rm {hunches_path}"
             )
 
     init_config = {"replay_dir": str(replay_dir), **(critic_config or {})}
     critic.init(init_config)
-    # Writer must be constructed AFTER critic.init() — init may restore
-    # a hunches checkpoint, and the writer scans existing IDs on disk
-    # to set its next-ID counter.
     hunches_writer = HunchesWriter(hunches_path=hunches_path)
 
-    state = TriggerV1State()
-    result = ReplayResult()
     ctx = _Ctx(
-        tick_counter=0,
+        tick_counter=tick_counter_init,
         critic=critic,
         hunches_writer=hunches_writer,
+        hunch_filter=hunch_filter,
         result=result,
         on_log=on_log,
     )
-    last_sim_now = 0.0
-    # Bookmarks are already assigned in conversation.jsonl's `tick_seq`;
-    # the bookmark before the very first event is 0.
-    bookmark_pre_event = 0
 
+    absolute_index = start_index
+    events_this_run = 0
     try:
         for i, te in enumerate(trigger_events):
-            if max_events is not None and i >= max_events:
+            if i < start_index:
+                continue
+            if max_events is not None and events_this_run >= max_events:
                 break
+            ticks_before = result.ticks_fired
             state, last_sim_now = _drive_one_event(
                 ctx=ctx,
                 state=state,
@@ -316,11 +304,31 @@ def run_replay_from_dir(
                 bookmark_pre_event=bookmark_pre_event,
                 bookmark_now=te.tick_seq,
                 last_sim_now=last_sim_now,
-                skip_virtual_ticks=skip_virtual_ticks,
             )
             bookmark_pre_event = te.tick_seq
+            absolute_index = i + 1
+            events_this_run += 1
+            if result.ticks_fired > ticks_before:
+                write_checkpoint(cp_path, checkpoint_from_trigger_state(
+                    state,
+                    events_consumed=absolute_index,
+                    ticks_fired=result.ticks_fired,
+                    hunches_emitted=result.hunches_emitted,
+                    tick_counter=ctx.tick_counter,
+                    last_sim_now=last_sim_now,
+                    bookmark_pre_event=bookmark_pre_event,
+                ))
     finally:
         critic.shutdown()
+        write_checkpoint(cp_path, checkpoint_from_trigger_state(
+            state,
+            events_consumed=absolute_index,
+            ticks_fired=result.ticks_fired,
+            hunches_emitted=result.hunches_emitted,
+            tick_counter=ctx.tick_counter,
+            last_sim_now=last_sim_now,
+            bookmark_pre_event=bookmark_pre_event,
+        ))
 
     return result
 
@@ -335,6 +343,7 @@ class _Ctx:
     tick_counter: int
     critic: Critic
     hunches_writer: HunchesWriter
+    hunch_filter: HunchFilter | None
     result: ReplayResult
     on_log: Callable[[str], None] | None
 
@@ -349,26 +358,17 @@ def _drive_one_event(
     bookmark_pre_event: int,
     bookmark_now: int,
     last_sim_now: float,
-    skip_virtual_ticks: bool = False,
 ) -> tuple[TriggerV1State, float]:
-    """Process one event: clamp sim_now, inject virtual ticks into the gap,
-    evaluate the event-driven trigger, and observe it into state.
+    """Process one event: clamp sim_now, evaluate the trigger, observe
+    into state.
 
-    Shared between `run_replay` (events-in, writer-backed) and
-    `run_replay_from_dir` (loaded-from-replay-dir, read-only). Both
-    callers are expected to have already assigned `bookmark_now`
+    Both callers are expected to have already assigned `bookmark_now`
     (via writer.tick_seq++ or by reading the loaded event's tick_seq).
-    `bookmark_pre_event` is the buffer state *before* this event was
-    appended — used by virtual-tick math to check "has anything new
-    arrived since the last tick?" without counting this event yet.
     """
     parsed_ts = _parse_ts(ts_raw)
     if parsed_ts is None:
-        # Keep sim_now monotone; fall back to the previous value.
         sim_now = last_sim_now
     elif parsed_ts < last_sim_now:
-        # Non-monotonic — clamp to last_sim_now to avoid negative
-        # deltas in trigger math.
         ctx.result.backward_ts_warnings += 1
         if ctx.on_log is not None:
             ctx.on_log(
@@ -379,43 +379,18 @@ def _drive_one_event(
     else:
         sim_now = parsed_ts
 
-    # Inject virtual ticks in the gap (last_sim_now, sim_now] — moments
-    # when the live loop would have fired on silence or max_interval
-    # even though no event arrived. Skipped when the caller uses a
-    # policy that only fires on real events (e.g. claude-stopped).
-    while not skip_virtual_ticks:
-        vt = _next_virtual_tick_time(
-            state, last_sim_now, sim_now, bookmark_pre_event, cfg,
-        )
-        if vt is None:
-            break
-        state = _fire_tick(
-            ctx=ctx,
-            state=state,
-            now=vt,
-            bookmark_now=bookmark_pre_event,
-            event_index=event_index,
-            ts_raw_for_record="",
-            is_virtual=True,
-        )
-        last_sim_now = vt
-
     last_sim_now = sim_now
     ctx.result.events_consumed += 1
 
     fire = decide_tick_v1(state, sim_now, bookmark_now, etype, cfg)
     if fire is not None:
-        effective_bookmark = bookmark_now
-        if fire == "exclusive" and bookmark_now > state.last_tick_bookmark + 1:
-            effective_bookmark = bookmark_now - 1
         state = _fire_tick(
             ctx=ctx,
             state=state,
             now=sim_now,
-            bookmark_now=effective_bookmark,
+            bookmark_now=bookmark_now,
             event_index=event_index,
             ts_raw_for_record=ts_raw,
-            is_virtual=False,
         )
 
     state = observe_event_v1(state, etype, sim_now)
@@ -429,7 +404,6 @@ def _fire_tick(
     bookmark_now: int,
     event_index: int,
     ts_raw_for_record: str,
-    is_virtual: bool,
 ) -> TriggerV1State:
     """Run one critic tick, persist hunches, update result + log. Returns
     the new trigger state (with last_tick_ts / bookmark updated and
@@ -448,13 +422,12 @@ def _fire_tick(
         state = mark_tick_finished_v1(state)
 
     ctx.result.ticks_fired += 1
-    if is_virtual:
-        ctx.result.virtual_ticks_fired += 1
-    _persist_hunches(
+    emitted = _persist_hunches(
         hunches, ctx.hunches_writer, ts_raw_for_record, ctx.tick_counter,
         bookmark_prev=bookmark_prev, bookmark_now=bookmark_now,
+        hunch_filter=ctx.hunch_filter,
     )
-    ctx.result.hunches_emitted += len(hunches)
+    ctx.result.hunches_emitted += emitted
     ctx.result.tick_log.append({
         "tick_id": tick_id,
         "sim_now": now,
@@ -462,67 +435,15 @@ def _fire_tick(
         "bookmark_prev": bookmark_prev,
         "bookmark_now": bookmark_now,
         "hunch_count": len(hunches),
-        "virtual": is_virtual,
     })
     if ctx.on_log is not None:
-        kind = "virtual " if is_virtual else ""
         ctx.on_log(
-            f"[replay] {kind}{tick_id} @ event {event_index} "
+            f"[replay] {tick_id} @ event {event_index} "
             f"(bookmark {bookmark_prev}→{bookmark_now}) "
             f"hunches={len(hunches)}"
         )
     return state
 
-
-def _next_virtual_tick_time(
-    state: TriggerV1State,
-    gap_start: float,
-    gap_end: float,
-    current_bookmark: int,
-    cfg: TriggerV1Config,
-) -> float | None:
-    """Earliest moment in `(gap_start, gap_end]` at which the v1 policy
-    would have fired on silence or max-interval alone (no event arrived).
-
-    Returns the fire time, or None if no virtual tick fires in this gap.
-    Candidates:
-      - `last_assistant_ts + silence_s` — monologue-end timer. Also
-        requires min_debounce_s elapsed since the last tick.
-      - `last_tick_ts + max_interval_s` — forced fire for long runs.
-        Only applies when we've already ticked at least once.
-
-    Shared policy rules still hold: no-fire-if-in-flight, no-fire-if-no-
-    new-content. User-text cases are event-driven, not time-driven,
-    so they're absent here.
-    """
-    if state.in_flight:
-        return None
-    if current_bookmark <= state.last_tick_bookmark:
-        return None
-
-    candidates: list[float] = []
-
-    if state.last_assistant_ts > 0:
-        # Silence fires when BOTH silence_s has elapsed since the last
-        # assistant utterance AND min_debounce_s has elapsed since the
-        # last tick. If silence is ready but debounce isn't, the live
-        # poll loop waits for debounce — so fire at max(silence, debounce).
-        silence_ready = state.last_assistant_ts + cfg.silence_s
-        if state.has_ticked:
-            silence_fire_at = max(
-                silence_ready, state.last_tick_ts + cfg.min_debounce_s,
-            )
-        else:
-            silence_fire_at = silence_ready
-        if gap_start < silence_fire_at <= gap_end:
-            candidates.append(silence_fire_at)
-
-    if state.has_ticked:
-        max_time = state.last_tick_ts + cfg.max_interval_s
-        if gap_start < max_time <= gap_end:
-            candidates.append(max_time)
-
-    return min(candidates) if candidates else None
 
 
 def _persist_hunches(
@@ -533,29 +454,52 @@ def _persist_hunches(
     *,
     bookmark_prev: int,
     bookmark_now: int,
-) -> None:
-    """Append each hunch as an emit event in hunches.jsonl, mirroring live."""
-    for hunch in hunches:
+    hunch_filter: HunchFilter | None = None,
+) -> int:
+    """Append hunches to hunches.jsonl, applying filter if provided.
+
+    Returns the number of hunches that passed the filter (emitted)."""
+    resolved_ts = ts or _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+    if hunch_filter is not None:
+        results = hunch_filter.filter_batch(hunches, bookmark_prev, bookmark_now)
+    else:
+        from hunch.filter import FilterResult
+        results = [FilterResult(hunch=h, passed=True) for h in hunches]
+
+    emitted = 0
+    for fr in results:
         hid = writer.allocate_id()
-        writer.write_emit(
-            hunch=hunch,
-            hunch_id=hid,
-            ts=ts or _dt.datetime.now(_dt.timezone.utc).isoformat(),
-            emitted_by_tick=tick_num,
-            bookmark_prev=bookmark_prev,
-            bookmark_now=bookmark_now,
-        )
+        if fr.passed:
+            writer.write_emit(
+                hunch=fr.hunch,
+                hunch_id=hid,
+                ts=resolved_ts,
+                emitted_by_tick=tick_num,
+                bookmark_prev=bookmark_prev,
+                bookmark_now=bookmark_now,
+            )
+            emitted += 1
+        else:
+            writer.write_filtered(
+                hunch=fr.hunch,
+                hunch_id=hid,
+                ts=resolved_ts,
+                emitted_by_tick=tick_num,
+                bookmark_prev=bookmark_prev,
+                bookmark_now=bookmark_now,
+                filter_type=fr.filter_type,
+                filter_reason=fr.reason,
+            )
+    return emitted
 
 
-def _check_replay_dir_empty(replay_dir: Path, allow_existing: bool) -> None:
+def _check_replay_dir_empty(replay_dir: Path) -> None:
     """Refuse to write into a non-empty replay buffer.
 
     Appending to existing `conversation.jsonl` / `hunches.jsonl` silently
-    doubles events and collides hunch ids. Catch that at the door. Callers
-    who really want to append (not a v1 use case) set allow_existing=True.
+    doubles events and collides hunch ids. Catch that at the door.
     """
-    if allow_existing:
-        return
     candidates = [
         replay_dir / "conversation.jsonl",
         replay_dir / "artifacts.jsonl",
@@ -565,15 +509,13 @@ def _check_replay_dir_empty(replay_dir: Path, allow_existing: bool) -> None:
         if p.exists() and p.stat().st_size > 0:
             raise RuntimeError(
                 f"replay_dir {replay_dir} already contains {p.name}; "
-                "refusing to clobber. Remove the directory or pass "
-                "allow_existing=True."
+                "refusing to clobber. Remove the directory first."
             )
     artifacts_sub = replay_dir / "artifacts"
     if artifacts_sub.exists() and any(artifacts_sub.iterdir()):
         raise RuntimeError(
             f"replay_dir {replay_dir} already contains artifacts/; "
-            "refusing to clobber. Remove the directory or pass "
-            "allow_existing=True."
+            "refusing to clobber. Remove the directory first."
         )
 
 

@@ -60,6 +60,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="trigger: min seconds between ticks (default: 300)",
     )
     run.add_argument(
+        "--no-filter",
+        action="store_true",
+        help="disable the post-critic novelty + dedup filter",
+    )
+    run.add_argument(
         "--critic",
         choices=("stub", "sonnet", "sonnet-dry"),
         default="stub",
@@ -138,7 +143,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--replay-dir",
         type=Path,
         required=True,
-        help="replay-buffer dir (conversation.jsonl, artifacts/, hunches.jsonl)",
+        help="replay-buffer dir (conversation.jsonl, artifacts/). "
+        "Read-only — the Critic reads from here but never writes to it.",
+    )
+    rpo.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="directory for eval output (hunches.jsonl, checkpoint.json). "
+        "Must differ from --replay-dir. Resumable: re-running against a "
+        "partially-completed output dir continues from the last checkpoint.",
     )
     rpo.add_argument(
         "--claude-log",
@@ -156,9 +170,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "sonnet = accumulating v0.1. sonnet-dry = v0.1 with no model "
         "call.",
     )
-    rpo.add_argument("--silence-s", type=float, default=30.0)
     rpo.add_argument("--min-debounce-s", type=float, default=300.0)
-    rpo.add_argument("--max-interval-s", type=float, default=600.0)
     rpo.add_argument(
         "--max-events",
         type=int,
@@ -166,16 +178,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="cap on events consumed (default: all)",
     )
     rpo.add_argument(
-        "--allow-existing",
+        "--no-filter",
         action="store_true",
-        help="(with --claude-log) append to an existing replay_dir instead "
-        "of refusing; use only for resumption — will duplicate events",
-    )
-    rpo.add_argument(
-        "--overwrite-hunches",
-        action="store_true",
-        help="(without --claude-log) delete existing hunches.jsonl before "
-        "the run. Default: refuse if hunches.jsonl is non-empty.",
+        help="disable the post-critic novelty + dedup filter",
     )
 
     aweb = sub.add_parser(
@@ -249,13 +254,11 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         sys.stdout.write(msg + "\n")
         sys.stdout.flush()
 
-    trigger_cfg = TriggerV1Config(
-        silence_s=ns.min_debounce_s,
-        min_debounce_s=ns.min_debounce_s,
-        fire_on_turn_end=True,
-    )
+    trigger_cfg = TriggerV1Config(min_debounce_s=ns.min_debounce_s)
 
     critic_factory = _resolve_critic_factory(ns.critic, _log)
+    filter_enabled = not ns.no_filter
+    client = _try_anthropic_client() if filter_enabled else None
     config = RunConfig(
         cwd=cwd,
         transcript_path=ns.transcript,
@@ -263,6 +266,8 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         project_roots=list(ns.project_roots or []),
         poll_s=ns.poll,
         critic_factory=critic_factory,
+        filter_enabled=filter_enabled,
+        anthropic_client=client,
         trigger_config=trigger_cfg,
     )
 
@@ -275,6 +280,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     _log(f"           replay={config.resolved_replay_dir()}")
     _log(f"           critic={type(runner.critic).__name__}")
     _log(f"           trigger=claude-stopped (debounce={trigger_cfg.min_debounce_s}s)")
+    _log(f"           filter={'on' if config.filter_enabled else 'off'}")
     _log(f"           poll={config.poll_s}s")
     _log("Ctrl-C to stop.")
     runner.run_forever()
@@ -331,6 +337,7 @@ def _cmd_init(ns: argparse.Namespace) -> int:
 
 
 def _cmd_replay_offline(ns: argparse.Namespace) -> int:
+    from hunch.filter import HunchFilter
     from hunch.replay import (
         run_replay_from_claude_log,
         run_replay_from_dir,
@@ -341,54 +348,87 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
         sys.stdout.write(msg + "\n")
         sys.stdout.flush()
 
+    replay_dir = ns.replay_dir.resolve()
+    output_dir = ns.output_dir.resolve()
+
+    if replay_dir == output_dir:
+        sys.stderr.write(
+            "hunch replay-offline: --output-dir must differ from "
+            "--replay-dir (the replay buffer is read-only).\n"
+        )
+        return 1
+
+    filter_enabled = not ns.no_filter
+    client = _try_anthropic_client() if filter_enabled else None
+    hunch_filter = HunchFilter(
+        replay_dir=replay_dir,
+        client=client,
+        enabled=filter_enabled,
+        log=_log,
+    )
+    existing_hunches_path = output_dir / "hunches.jsonl"
+    if existing_hunches_path.exists():
+        from hunch.journal.hunches import read_current_hunches
+        existing = read_current_hunches(existing_hunches_path)
+        hunch_filter.init_from_existing(existing)
+
     critic_factory = _resolve_critic_factory(ns.critic, _log)
     critic = critic_factory()
-    trigger_cfg = TriggerV1Config(
-        silence_s=ns.silence_s,
-        min_debounce_s=ns.min_debounce_s,
-        max_interval_s=ns.max_interval_s,
-    )
+    trigger_cfg = TriggerV1Config(min_debounce_s=ns.min_debounce_s)
     try:
         if ns.claude_log is not None:
             _log(
                 f"hunch replay-offline: parse {ns.claude_log} → "
-                f"{ns.replay_dir}  critic={ns.critic}"
-                f"  silence={ns.silence_s}s debounce={ns.min_debounce_s}s"
-                f" max={ns.max_interval_s}s"
+                f"{replay_dir}  critic={ns.critic}"
+                f"  debounce={ns.min_debounce_s}s"
+                f"  filter={'on' if filter_enabled else 'off'}"
+                f"\n  output → {output_dir}"
             )
             result = run_replay_from_claude_log(
                 claude_log=ns.claude_log,
-                replay_dir=ns.replay_dir,
+                replay_dir=replay_dir,
                 critic=critic,
                 trigger_config=trigger_cfg,
                 on_log=_log,
                 max_events=ns.max_events,
-                allow_existing=ns.allow_existing,
+                hunch_filter=hunch_filter,
+                output_dir=output_dir,
             )
         else:
             _log(
-                f"hunch replay-offline: from-dir {ns.replay_dir}"
-                f"  critic={ns.critic}  silence={ns.silence_s}s"
-                f" debounce={ns.min_debounce_s}s max={ns.max_interval_s}s"
+                f"hunch replay-offline: from-dir {replay_dir}"
+                f"  critic={ns.critic}  debounce={ns.min_debounce_s}s"
+                f"  filter={'on' if filter_enabled else 'off'}"
+                f"\n  output → {output_dir}"
             )
             result = run_replay_from_dir(
-                replay_dir=ns.replay_dir,
+                replay_dir=replay_dir,
                 critic=critic,
                 trigger_config=trigger_cfg,
                 on_log=_log,
                 max_events=ns.max_events,
-                overwrite_hunches=ns.overwrite_hunches,
+                hunch_filter=hunch_filter,
+                output_dir=output_dir,
             )
     except (RuntimeError, FileNotFoundError) as e:
         sys.stderr.write(f"hunch replay-offline: {e}\n")
         return 1
     _log(
         f"[replay] done: events={result.events_consumed} "
-        f"ticks={result.ticks_fired} (virtual={result.virtual_ticks_fired}) "
+        f"ticks={result.ticks_fired} "
         f"hunches={result.hunches_emitted} "
         f"backward_ts={result.backward_ts_warnings}"
     )
     return 0
+
+
+def _try_anthropic_client():
+    """Try to create an Anthropic SDK client. Returns None on failure."""
+    try:
+        import anthropic
+        return anthropic.Anthropic()
+    except Exception:
+        return None
 
 
 def _resolve_critic_factory(name: str, log):

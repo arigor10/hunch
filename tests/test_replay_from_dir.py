@@ -25,9 +25,11 @@ from hunch.trigger import TriggerV1Config
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers (mirrors test_replay_driver.py — kept local to avoid
-# cross-file fixtures)
+# Shared helpers
 # ---------------------------------------------------------------------------
+
+NO_DEBOUNCE = TriggerV1Config(min_debounce_s=0.0)
+
 
 def _ts(epoch_s: float) -> str:
     return _dt.datetime.fromtimestamp(epoch_s, tz=_dt.timezone.utc).isoformat()
@@ -81,9 +83,8 @@ class _RecordingCritic:
 
 def _populate(replay_dir: Path, events: list[dict], project_roots: list[str]) -> None:
     """Run events through the full `run_replay` pipeline to populate the
-    replay dir — same path a live run or parse-script would take. Then
-    delete the hunches.jsonl that `run_replay` produced (we're testing
-    the from-dir path against a virgin hunches state)."""
+    replay dir. Then delete the hunches.jsonl that `run_replay` produced
+    (we're testing the from-dir path against a virgin hunches state)."""
     run_replay(
         events=events, project_roots=project_roots,
         replay_dir=replay_dir, critic=_RecordingCritic(),
@@ -108,7 +109,6 @@ def test_loader_reads_tick_seq_in_order(tmp_path: Path):
     loaded = load_trigger_events(replay_dir)
     assert [e.tick_seq for e in loaded] == [1, 2, 3]
     assert [e.type for e in loaded] == ["user_text", "assistant_text", "artifact_write"]
-    # timestamps are preserved as-written
     assert loaded[0].timestamp.startswith("2026") or loaded[0].timestamp.startswith("1970")
 
 
@@ -144,14 +144,13 @@ def test_loader_rejects_malformed_json(tmp_path: Path):
 
 def test_from_dir_fires_same_ticks_as_events_in_mode(tmp_path: Path):
     # Same event stream, two code paths: events-in vs loaded-from-dir.
-    # The tick pattern MUST match — that's the whole point of the refactor.
+    # The tick pattern MUST match.
     proj = "/tmp/proj"
-    cfg = TriggerV1Config(silence_s=30.0, min_debounce_s=60.0, max_interval_s=120.0)
     events = [
-        _write(0.0, f"{proj}/a.md", "a"),
         _asst(10.0, "thinking"),
-        _asst(60.0, "still"),
-        _asst(130.0, "done"),
+        _user(60.0, "ok"),
+        _asst(130.0, "more"),
+        _user(200.0, "next"),
     ]
 
     # Path A: events-in
@@ -159,7 +158,7 @@ def test_from_dir_fires_same_ticks_as_events_in_mode(tmp_path: Path):
     critic_a = _RecordingCritic()
     result_a = run_replay(
         events=events, project_roots=[proj],
-        replay_dir=dir_a, critic=critic_a, trigger_config=cfg,
+        replay_dir=dir_a, critic=critic_a, trigger_config=NO_DEBOUNCE,
     )
 
     # Path B: populate dir_b, then from-dir
@@ -167,12 +166,10 @@ def test_from_dir_fires_same_ticks_as_events_in_mode(tmp_path: Path):
     _populate(dir_b, events, [proj])
     critic_b = _RecordingCritic()
     result_b = run_replay_from_dir(
-        replay_dir=dir_b, critic=critic_b, trigger_config=cfg,
+        replay_dir=dir_b, critic=critic_b, trigger_config=NO_DEBOUNCE,
     )
 
-    # Same ticks, same bookmarks, same virtual-tick counts.
     assert result_a.ticks_fired == result_b.ticks_fired
-    assert result_a.virtual_ticks_fired == result_b.virtual_ticks_fired
     assert [t["prev"] for t in critic_a.tick_log] == [t["prev"] for t in critic_b.tick_log]
     assert [t["now"] for t in critic_a.tick_log] == [t["now"] for t in critic_b.tick_log]
 
@@ -181,7 +178,6 @@ def test_from_dir_refuses_existing_hunches(tmp_path: Path):
     proj = "/tmp/proj"
     replay_dir = tmp_path / "replay"
     _populate(replay_dir, [_write(0.0, f"{proj}/a.md", "a")], [proj])
-    # Create a non-empty hunches.jsonl to simulate a prior from-dir run.
     (replay_dir / "hunches.jsonl").write_text(
         json.dumps({"type": "emit", "hunch_id": "h-0001"}) + "\n"
     )
@@ -194,33 +190,38 @@ def test_from_dir_refuses_existing_hunches(tmp_path: Path):
 def test_from_dir_overwrite_hunches_replaces_file(tmp_path: Path):
     proj = "/tmp/proj"
     replay_dir = tmp_path / "replay"
-    _populate(replay_dir, [_asst(100.0, "start"), _write(135.0, f"{proj}/a.md", "a")], [proj])
+    _populate(replay_dir, [
+        _asst(100.0, "start"),
+        _write(135.0, f"{proj}/a.md", "a"),
+        _user(200.0, "ok"),
+    ], [proj])
     (replay_dir / "hunches.jsonl").write_text(
         json.dumps({"type": "emit", "hunch_id": "h-9999"}) + "\n"
     )
     critic = _RecordingCritic(emit_at={1})
     result = run_replay_from_dir(
         replay_dir=replay_dir, critic=critic, overwrite_hunches=True,
+        trigger_config=NO_DEBOUNCE,
     )
     records = [
         json.loads(line)
         for line in (replay_dir / "hunches.jsonl").read_text().splitlines()
         if line.strip() and json.loads(line).get("type") != "meta"
     ]
-    # The stale h-9999 record is gone; only the fresh hunch from this run.
     assert all(r["hunch_id"] != "h-9999" for r in records)
     assert result.hunches_emitted >= 1
 
 
 def test_from_dir_is_read_only_on_conversation_and_artifacts(tmp_path: Path):
-    # After from-dir runs, conversation.jsonl and artifacts.jsonl must be
-    # byte-identical to their pre-run state. Only hunches.jsonl changes.
     proj = "/tmp/proj"
     replay_dir = tmp_path / "replay"
     events = [
-        _write(0.0, f"{proj}/a.md", "a"),
         _asst(10.0, "thinking"),
+        _write(20.0, f"{proj}/a.md", "a"),
+        _user(60.0, "ok"),
+        _asst(70.0, "more"),
         _write(120.0, f"{proj}/b.md", "b"),
+        _user(200.0, "done"),
     ]
     _populate(replay_dir, events, [proj])
 
@@ -230,7 +231,10 @@ def test_from_dir_is_read_only_on_conversation_and_artifacts(tmp_path: Path):
         p.name for p in (replay_dir / "artifacts").iterdir()
     )
 
-    run_replay_from_dir(replay_dir=replay_dir, critic=_RecordingCritic())
+    run_replay_from_dir(
+        replay_dir=replay_dir, critic=_RecordingCritic(),
+        trigger_config=NO_DEBOUNCE,
+    )
 
     assert (replay_dir / "conversation.jsonl").read_bytes() == conv_before
     assert (replay_dir / "artifacts.jsonl").read_bytes() == arts_before

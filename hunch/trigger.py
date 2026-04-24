@@ -177,12 +177,9 @@ class TriggerLoop:
 # Trigger v1 policy (shared by live + offline replay)
 # ---------------------------------------------------------------------------
 #
-# v1 adds three knobs over v0's single interval:
-#   silence_s       — fire when Claude has been quiet this long.
-#   min_debounce_s  — never fire more often than this.
-#   max_interval_s  — if nothing else fires, force one every this long.
-# And a turn-end mode (`fire_on_turn_end`) that fires on `claude_stopped`
-# events — the production mode for `hunch run`.
+# Fires on `claude_stopped` events — in live mode these come from the
+# Stop hook, in offline mode they're synthesized at speaker boundaries.
+# Only knob is min_debounce_s (minimum seconds between ticks).
 #
 # The design is shared across live and offline: offline feeds sim_now
 # from event timestamps, live from wall clock. Same decide function.
@@ -190,33 +187,23 @@ class TriggerLoop:
 
 
 FIRE_INCLUSIVE = "inclusive"
-FIRE_EXCLUSIVE = "exclusive"
 
 
 @dataclass(frozen=True)
 class TriggerV1Config:
-    """Knobs for the v1 policy. Defaults are the production cadence
-    proposed in docs/unified_replay_mode.md."""
-    silence_s: float = 30.0
+    """Knobs for the v1 policy."""
     min_debounce_s: float = 300.0
-    max_interval_s: float = 600.0
-    fire_on_turn_end: bool = False
 
 
 @dataclass(frozen=True)
 class TriggerV1State:
     """Immutable trigger state for v1.
 
-    `last_assistant_ts` is the timestamp of the most recent
-    `assistant_text` event the trigger has seen, used for silence
-    detection. `last_tick_ts` and `last_tick_bookmark` mirror v0's
-    meaning. `in_flight` exists for future-async loops.
-    `last_event_type` tracks the previous event for turn-end detection.
+    `last_tick_ts` and `last_tick_bookmark` mirror v0's meaning.
+    `in_flight` exists for future-async loops.
     """
     last_tick_ts: float = 0.0
     last_tick_bookmark: int = 0
-    last_assistant_ts: float = 0.0
-    last_event_type: str = ""
     has_ticked: bool = False
     in_flight: bool = False
 
@@ -234,28 +221,12 @@ def decide_tick_v1(
       None            — don't fire.
       FIRE_INCLUSIVE   — fire; bookmark_now = current_bookmark (include
                          the current event in the tick window).
-      FIRE_EXCLUSIVE   — fire; bookmark_now = current_bookmark - 1
-                         (exclude the current event — used for turn-end
-                         so the critic reviews the assistant's work
-                         before the user's new message).
 
-    Called after appending the current event to the buffer (so
-    `current_bookmark` reflects its inclusion), with the *pre-event*
-    `state` — i.e. last_assistant_ts is the previous assistant_text's
-    timestamp, not the current one if this event is itself assistant_text.
-
-    Fire rules:
-
-      In claude-stopped mode (`fire_on_turn_end=True`):
-        Fire INCLUSIVE when a `claude_stopped` event arrives, subject
-        to debounce. This is the production mode for `hunch run`.
-
-      In classic mode (`fire_on_turn_end=False`):
-        1. Max-interval override. Once min_debounce_s has elapsed, if
-           `max_interval_s` has also elapsed since the last tick, fire.
-        2. Silence: elapsed since last assistant_text exceeds silence_s,
-           AND current event isn't assistant_text or user_text.
-           Min-debounce applies.
+    Fire when a `claude_stopped` event arrives (appended by the Stop
+    hook or synthesized offline at speaker boundaries). INCLUSIVE
+    because the claude_stopped event itself should be in the window
+    (it marks the boundary, not a new user message). Debounce still
+    applies to prevent rapid-fire during back-and-forth exchanges.
 
     Hard skips (return None regardless):
       - In flight.
@@ -265,45 +236,13 @@ def decide_tick_v1(
         return None
     if current_bookmark <= state.last_tick_bookmark:
         return None
-
-    # --- Claude-stopped mode (fire_on_turn_end=True) ---
-    # Fire when a `claude_stopped` event arrives (appended by the Stop
-    # hook or synthesized offline at speaker boundaries). INCLUSIVE
-    # because the claude_stopped event itself should be in the window
-    # (it marks the boundary, not a new user message). Debounce still
-    # applies to prevent rapid-fire during back-and-forth exchanges.
-    if config.fire_on_turn_end:
-        if current_event_type != "claude_stopped":
-            return None
-        if state.has_ticked:
-            dt_since_tick = max(0.0, now - state.last_tick_ts)
-            if dt_since_tick < config.min_debounce_s:
-                return None
-        return FIRE_INCLUSIVE
-
-    # --- Classic mode (fire_on_turn_end=False) ---
-    # User text never fires in classic mode.
-    if current_event_type == "user_text":
+    if current_event_type != "claude_stopped":
         return None
-
-    # Debounce since the last tick. First tick is unconstrained so the
-    # policy actually fires on a fresh buffer.
     if state.has_ticked:
         dt_since_tick = max(0.0, now - state.last_tick_ts)
         if dt_since_tick < config.min_debounce_s:
             return None
-        if dt_since_tick >= config.max_interval_s:
-            return FIRE_INCLUSIVE
-
-    # Silence rule: fire when Claude has been quiet >= silence_s and
-    # a non-assistant event arrives.
-    if current_event_type != "assistant_text":
-        if state.last_assistant_ts > 0:
-            silence_dt = max(0.0, now - state.last_assistant_ts)
-            if silence_dt >= config.silence_s:
-                return FIRE_INCLUSIVE
-
-    return None
+    return FIRE_INCLUSIVE
 
 
 def mark_tick_started_v1(
@@ -333,10 +272,9 @@ def observe_event_v1(
 ) -> TriggerV1State:
     """State update for an event appended to the buffer.
 
-    Tracks `last_assistant_ts` (for silence detection) and
-    `last_event_type` (for turn-end detection). Call AFTER
-    `decide_tick_v1` so those checks see the pre-event state.
+    Currently a no-op — the claude-stopped trigger only needs
+    last_tick_ts / last_tick_bookmark (updated by mark_tick_started_v1).
+    Kept as a hook point so callers don't need to change if the policy
+    gains event-tracking logic later.
     """
-    if event_type == "assistant_text":
-        return replace(state, last_assistant_ts=event_ts, last_event_type=event_type)
-    return replace(state, last_event_type=event_type)
+    return state
