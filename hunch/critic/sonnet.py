@@ -121,8 +121,9 @@ class SonnetCriticConfig:
     model: str = DEFAULT_MODEL
     prompt_path: Path | None = None           # None → packaged nose_v1.md
     cli_timeout_s: float = 600.0
-    low_watermark: int = 150_000
-    high_watermark: int = 200_000
+    low_watermark: int = 140_000
+    high_watermark: int = 180_000
+    max_consecutive_failures: int = 3
     dry_run: bool = False
 
 
@@ -154,6 +155,7 @@ class SonnetCritic:
         default_factory=set, init=False, repr=False,
     )
     _initialized: bool = field(default=False, init=False, repr=False)
+    _consecutive_failures: int = field(default=0, init=False, repr=False)
 
     # ------------------------------------------------------------------
     # Critic protocol
@@ -217,15 +219,32 @@ class SonnetCritic:
         try:
             text, input_tokens = self._call_model(prompt)
         except Exception as e:  # pylint: disable=broad-except
-            self._log(f"[critic] model call failed: {e}")
+            self._consecutive_failures += 1
+            self._log(
+                f"[critic] model call failed ({self._consecutive_failures}/"
+                f"{self.config.max_consecutive_failures}): {e}"
+            )
+            if self._consecutive_failures >= self.config.max_consecutive_failures:
+                raise RuntimeError(
+                    f"Critic aborting: {self._consecutive_failures} consecutive "
+                    f"model failures. Last error: {e}"
+                ) from e
             return []
 
-        if input_tokens is not None:
+        self._consecutive_failures = 0
+        if input_tokens is not None and input_tokens > 0:
+            pre_proj = projected
             self._stream.update_observed_tokens(input_tokens)
             self._log(
                 f"[critic] {tick_id} prompt_chars={len(prompt):,} "
                 f"input_tokens={input_tokens:,} "
-                f"proj_tokens={self._stream.projected_tokens():,}"
+                f"est_tokens={pre_proj:,} "
+                f"err={input_tokens - pre_proj:+,}"
+            )
+        elif input_tokens == 0:
+            self._log(
+                f"[critic] {tick_id} prompt_chars={len(prompt):,} "
+                f"input_tokens=0 (skipped estimation update)"
             )
 
         hunches = parse_response(text)
