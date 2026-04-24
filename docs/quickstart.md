@@ -155,3 +155,113 @@ hunch run --critic sonnet
 **Hunches not appearing in Claude's context** — Check that `hunch init` ran successfully and `.claude/settings.local.json` has both hook entries (UserPromptSubmit and Stop). The UserPromptSubmit hook injects hunches when you send a new message.
 
 **Critic takes a long time** — The first tick is the slowest (no prompt cache). Subsequent ticks benefit from Anthropic's automatic prompt caching. Typical: 10-30s for the first tick, 3-8s after.
+
+---
+
+## Offline evaluation
+
+You can run the Critic over a past research session to see what it would have flagged. This is useful for evaluating the Critic's quality, tuning trigger parameters, or reviewing a colleague's session after the fact.
+
+### Running the offline Critic
+
+There are two modes depending on what you have:
+
+#### Case 1: You have a replay directory (from a prior `hunch run`)
+
+If you ran `hunch run` in a project, the replay dir is at `<project>/.hunch/replay/`. It contains the parsed dialogue, artifact snapshots, and event logs.
+
+```bash
+hunch replay-offline \
+  --replay-dir /path/to/project/.hunch/replay \
+  --output-dir /path/to/project/.hunch/eval/run01 \
+  --critic sonnet
+```
+
+The replay directory is **read-only** — the Critic reads conversation and artifacts from it but never writes to it. All output goes to `--output-dir`.
+
+#### Case 2: You only have a raw Claude Code transcript
+
+If you never ran `hunch run` but have the raw `.jsonl` transcript (from `~/.claude/projects/`), pass it via `--claude-log`. The command parses the transcript into `--replay-dir` first, then drives the Critic over it. The `--replay-dir` must be empty (or not exist yet) — it will be populated from the transcript.
+
+```bash
+hunch replay-offline \
+  --replay-dir /path/to/fresh-replay \
+  --output-dir /path/to/fresh-replay-eval/run01 \
+  --claude-log ~/.claude/projects/-home-you-project/abc123.jsonl \
+  --critic sonnet
+```
+
+#### Resuming a partial run
+
+Both cases are **resumable**: if `--output-dir` already contains `checkpoint.json` from a partial run, the command resumes from where it left off — no duplicate API calls. If a Case 2 run was interrupted, resume it with the Case 1 command (the replay dir was already populated during the initial parse):
+
+```bash
+hunch replay-offline --replay-dir /path/to/.hunch/replay \
+  --output-dir /path/to/eval/run01 --critic sonnet
+```
+
+To start fresh instead, delete the output directory:
+
+```bash
+rm -r /path/to/project/.hunch/eval/run01
+```
+
+### What to expect
+
+The Critic fires at every turn boundary (when Claude finishes speaking and you respond), just like the live pipeline. Output looks like:
+
+```
+hunch replay-offline: from-dir .hunch/replay  critic=sonnet  ...  filter=on
+  output → .hunch/eval/run01
+[replay] t-0001 @ event 12 (bookmark 0→12) hunches=0
+[replay] t-0002 @ event 38 (bookmark 12→38) hunches=1
+  - h-0001 calibration drift
+  [filter] already raised: calibration drift
+  - h-0002 [filtered:novelty] calibration drift
+[replay] done: events=412 ticks=15 hunches=8
+```
+
+Each tick takes 3-30s depending on context size and prompt cache. A 400-event session with ~15 ticks typically takes 2-5 minutes and costs ~$1-3 in API credits.
+
+### Reviewing results
+
+Hunches are written to `hunches.jsonl` inside the output directory.
+
+**Quick list:**
+
+```bash
+hunch list --replay-dir /path/to/project/.hunch/eval/run01
+```
+
+**Web annotation UI** (full conversation + hunches side-by-side):
+
+```bash
+hunch annotate-web \
+  --replay-dir /path/to/project/.hunch/replay \
+  --run-dir /path/to/project/.hunch/eval/run01
+```
+
+Opens at `http://localhost:5555`. Click on a hunch to jump to the conversation context where it was raised.
+
+### Useful flags
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--critic sonnet` | `stub` | Use the Sonnet Critic (requires API key) |
+| `--critic sonnet-dry` | — | Full pipeline, no model call (test wiring + trigger timing) |
+| `--no-filter` | off | Disable dedup + novelty filter (emit all raw hunches) |
+| `--min-debounce-s N` | 300 | Minimum seconds between ticks |
+| `--max-events N` | all | Stop after N events (useful for smoke tests) |
+
+### Dry run first
+
+To verify everything is wired up before spending API credits:
+
+```bash
+hunch replay-offline \
+  --replay-dir /path/to/project/.hunch/replay \
+  --output-dir /tmp/hunch-dryrun \
+  --critic sonnet-dry
+```
+
+This runs the full pipeline — parsing, trigger, accumulator, prompt assembly — but skips the model call. You'll see how many ticks fire and their bookmark windows, which tells you the Critic's cadence is working correctly.

@@ -43,8 +43,7 @@ Build the skeleton so that every component we ship is **additive toward** the lo
                                       │ ├─ artifacts.jsonl        │
   ┌────────────┐       tick           │ ├─ artifacts/             │
   │  Trigger   │ ──────────┐          │ ├─ hunches.jsonl          │
-  └────────────┘           ▼          │ ├─ feedback.jsonl         │
-                                      │ └─ labels.jsonl           │
+  └────────────┘           ▼          │ └─ feedback.jsonl         │
                     ┌────────────┐    └───────────────────────────┘
                     │  Critic    │        ▲           ▲
                     │  process   │ ───────┘ writes    │ reads/writes
@@ -78,6 +77,9 @@ These are the interface-level commitments we take to the bank. Everything in v0 
 5. **Surface is file-triggered, not call-triggered.** Anything that wants to display, inject, or react to a hunch reads `hunches.jsonl` and `feedback.jsonl`. This lets v0's side panel, v0.5's PreToolUse hook, and v1's Stop hook all coexist and all consume the same data.
 6. **Two hooks wire the framework into Claude Code.** The `UserPromptSubmit` hook injects approved hunches into the Researcher's context. The `Stop` hook appends `claude_stopped` events to enable the trigger. Both are thin file readers/writers over the replay buffer. Swapping to `PreToolUse` or SDK injection later changes *when* prepending fires, not *what* is prepended.
 7. **Config is layered: required-interface < auto-discovery < `hunch init` scaffolding.** Zero-config usage must be possible for common layouts; opinionated scaffolding is optional.
+
+8. **Both online and offline modes are resumable.** After each Critic tick, the framework writes a `checkpoint.json` recording how far the pipeline has progressed. On restart, it resumes from the checkpoint rather than reprocessing the entire transcript. This applies symmetrically to `hunch run` (online) and `hunch replay-offline` (offline eval).
+9. **Offline eval writes to a separate output directory; the replay buffer is read-only.** `hunch replay-offline` takes an explicit `--output-dir` that must differ from `--replay-dir`. Hunches, labels, and checkpoint state go to the output dir; the replay buffer is never mutated by eval. This lets multiple eval runs coexist against the same replay data.
 
 If we're ever tempted to violate one of these to save time in v0, stop and rethink — we're about to close a door.
 
@@ -255,8 +257,6 @@ replay     = ".hunch/replay/"
 
 [trigger]
 min_debounce_s   = 300    # minimum seconds between ticks
-silence_s        = 30     # classic mode: fire after this much silence
-max_interval_s   = 600    # classic mode: forced fire ceiling
 
 [critic]
 command          = "python -m hunch.critic.sonnet"
@@ -474,19 +474,7 @@ Offline evaluators that need this attribution live in the eval harness, not in t
 }
 ```
 
-`.hunch/replay/labels.jsonl` — offline eval annotations (distinct from live `feedback.jsonl`):
-
-```jsonc
-{
-  "ts": "2026-04-14T11:00:00Z",
-  "hunch_id": "h-0007",
-  "label": "tp" | "fp" | "skip",
-  "category": null | "<optional category tag>",
-  "note": null | "<optional free-text note>"
-}
-```
-
-Live feedback captures the Scientist's in-the-moment reaction; labels capture deliberate offline evaluation for precision measurement. Both are append-only; for labels, last-write-wins per `hunch_id`.
+`feedback.jsonl` is operational: it gates whether approved hunches are injected into the Researcher's context (see §5 Surface). The labels are lightweight reactions, not deliberate ground-truth annotations — a "good" means "pass this to the Researcher" not "I've verified this is a true positive." Live feedback serves as a candidate signal for the label bank (good → candidate tp, bad → candidate fp, skip → unlabeled) but with a confidence discount relative to deliberate retrospective annotation. See [`docs/eval_infrastructure.md`](eval_infrastructure.md) for the eval-side `labels.jsonl` schema and the label bank flywheel.
 
 ## Appendix B: Critic protocol messages
 
