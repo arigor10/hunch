@@ -46,10 +46,18 @@ class ClaudeCliBackend:
         text = envelope.get("result", "")
         usage = envelope.get("usage") or {}
         input_tokens: int | None = None
+        output_tokens: int | None = None
+        cached_tokens: int | None = None
         if usage:
-            input_tokens = (
-                usage.get("input_tokens", 0)
-                + usage.get("cache_read_input_tokens", 0)
+            cached_tokens = (
+                usage.get("cache_read_input_tokens", 0)
                 + usage.get("cache_creation_input_tokens", 0)
             )
-        return ModelResponse(text=text, input_tokens=input_tokens)
+            input_tokens = usage.get("input_tokens", 0) + cached_tokens
+            output_tokens = usage.get("output_tokens", None)
+        return ModelResponse(
+            text=text,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
+        )

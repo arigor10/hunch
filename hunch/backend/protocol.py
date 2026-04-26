@@ -11,6 +11,8 @@ class ModelResponse:
     """Response from a model backend call."""
     text: str
     input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_tokens: int | None = None
 
 
 class Backend(Protocol):

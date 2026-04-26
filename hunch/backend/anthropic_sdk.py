@@ -45,10 +45,18 @@ class AnthropicSdkBackend:
 
         usage = getattr(response, "usage", None)
         input_tokens: int | None = None
+        output_tokens: int | None = None
+        cached_tokens: int | None = None
         if usage is not None:
-            input_tokens = (
-                getattr(usage, "input_tokens", 0)
-                + getattr(usage, "cache_read_input_tokens", 0)
+            cached_tokens = (
+                getattr(usage, "cache_read_input_tokens", 0)
                 + getattr(usage, "cache_creation_input_tokens", 0)
             )
-        return ModelResponse(text=text, input_tokens=input_tokens)
+            input_tokens = getattr(usage, "input_tokens", 0) + cached_tokens
+            output_tokens = getattr(usage, "output_tokens", None)
+        return ModelResponse(
+            text=text,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
+        )

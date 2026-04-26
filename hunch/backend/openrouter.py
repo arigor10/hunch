@@ -35,6 +35,7 @@ class OpenRouterBackend:
 
     _client: Any = field(default=None, init=False, repr=False)
     _call_count: int = field(default=0, init=False, repr=False)
+    _total_cost: float = field(default=0.0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.api_key is None:
@@ -70,15 +71,22 @@ class OpenRouterBackend:
                     timeout=self.timeout_s,
                     extra_body=extra_body or None,
                 )
+                if not completion.choices:
+                    raise ValueError("OpenRouter returned empty choices array")
                 text = completion.choices[0].message.content or ""
                 usage = getattr(completion, "usage", None)
                 input_tokens: int | None = None
+                output_tokens: int | None = None
                 cached_tokens: int | None = None
                 if usage is not None:
                     input_tokens = getattr(usage, "prompt_tokens", None)
+                    output_tokens = getattr(usage, "completion_tokens", None)
                     details = getattr(usage, "prompt_tokens_details", None)
                     if details is not None:
                         cached_tokens = getattr(details, "cached_tokens", None)
+                    cost = getattr(usage, "cost", None)
+                    if cost is not None:
+                        self._total_cost += float(cost)
 
                 self._call_count += 1
                 if self.log:
@@ -102,7 +110,12 @@ class OpenRouterBackend:
                         f"Check provider cache TTL and tick interval."
                     )
 
-                return ModelResponse(text=text, input_tokens=input_tokens)
+                return ModelResponse(
+                    text=text,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cached_tokens=cached_tokens,
+                )
             except RuntimeError:
                 raise
             except Exception as e:
@@ -121,3 +134,7 @@ class OpenRouterBackend:
         raise RuntimeError(
             f"OpenRouter call failed after {self.max_retries} attempts: {last_err}"
         )
+
+    def total_cost(self) -> float:
+        """Return accumulated USD cost from OpenRouter usage.cost field."""
+        return self._total_cost

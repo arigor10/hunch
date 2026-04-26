@@ -121,6 +121,11 @@ class CriticEngine:
     )
     _initialized: bool = field(default=False, init=False, repr=False)
     _consecutive_failures: int = field(default=0, init=False, repr=False)
+    _total_input_tokens: int = field(default=0, init=False, repr=False)
+    _total_output_tokens: int = field(default=0, init=False, repr=False)
+    _total_cached_tokens: int = field(default=0, init=False, repr=False)
+    _total_calls: int = field(default=0, init=False, repr=False)
+    _total_failures: int = field(default=0, init=False, repr=False)
 
     # ------------------------------------------------------------------
     # Critic protocol
@@ -185,6 +190,7 @@ class CriticEngine:
             response: ModelResponse = self.backend.call(prompt)
         except Exception as e:
             self._consecutive_failures += 1
+            self._total_failures += 1
             self._log(
                 f"[critic] model call failed ({self._consecutive_failures}/"
                 f"{self.config.max_consecutive_failures}): {e}"
@@ -197,8 +203,15 @@ class CriticEngine:
             return []
 
         self._consecutive_failures = 0
+        self._total_calls += 1
         text = response.text
         input_tokens = response.input_tokens
+        if input_tokens:
+            self._total_input_tokens += input_tokens
+        if response.output_tokens:
+            self._total_output_tokens += response.output_tokens
+        if response.cached_tokens:
+            self._total_cached_tokens += response.cached_tokens
 
         if input_tokens is not None and input_tokens > 0:
             pre_proj = projected
@@ -222,6 +235,25 @@ class CriticEngine:
 
     def shutdown(self) -> None:
         self._initialized = False
+        if hasattr(self.backend, "shutdown"):
+            self.backend.shutdown()
+
+    def stats(self) -> dict[str, Any]:
+        """Return accumulated run stats."""
+        cache_pct = 0.0
+        if self._total_input_tokens > 0:
+            cache_pct = 100.0 * self._total_cached_tokens / self._total_input_tokens
+        s: dict[str, Any] = {
+            "calls": self._total_calls,
+            "failures": self._total_failures,
+            "input_tokens": self._total_input_tokens,
+            "output_tokens": self._total_output_tokens,
+            "cached_tokens": self._total_cached_tokens,
+            "cache_hit_pct": round(cache_pct, 1),
+        }
+        if hasattr(self.backend, "total_cost"):
+            s["total_cost_usd"] = self.backend.total_cost()
+        return s
 
     # ------------------------------------------------------------------
     # Stream feeding

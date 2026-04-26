@@ -394,15 +394,18 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
         existing = read_current_hunches(existing_hunches_path)
         hunch_filter.init_from_existing(existing)
 
+    import time as _time
     critic_factory = _resolve_critic_factory(ns.critic, _log, config_path=ns.config)
     critic = critic_factory()
+    critic_label = _critic_label(ns)
     trigger_cfg = TriggerV1Config(min_debounce_s=ns.min_debounce_s)
+    t0 = _time.monotonic()
     try:
         if ns.claude_log is not None:
             rate_msg = f"  rate-limit={ns.min_tick_interval_s}s" if ns.min_tick_interval_s > 0 else ""
             _log(
                 f"hunch replay-offline: parse {ns.claude_log} → "
-                f"{replay_dir}  critic={ns.critic}"
+                f"{replay_dir}  critic={critic_label}"
                 f"  debounce={ns.min_debounce_s}s"
                 f"  filter={'on' if filter_enabled else 'off'}"
                 f"{rate_msg}"
@@ -423,7 +426,7 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
             rate_msg = f"  rate-limit={ns.min_tick_interval_s}s" if ns.min_tick_interval_s > 0 else ""
             _log(
                 f"hunch replay-offline: from-dir {replay_dir}"
-                f"  critic={ns.critic}  debounce={ns.min_debounce_s}s"
+                f"  critic={critic_label}  debounce={ns.min_debounce_s}s"
                 f"  filter={'on' if filter_enabled else 'off'}"
                 f"{rate_msg}"
                 f"\n  output → {output_dir}"
@@ -441,12 +444,28 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
     except (RuntimeError, FileNotFoundError) as e:
         sys.stderr.write(f"hunch replay-offline: {e}\n")
         return 1
+    wall_s = _time.monotonic() - t0
     _log(
         f"[replay] done: events={result.events_consumed} "
         f"ticks={result.ticks_fired} "
         f"hunches={result.hunches_emitted} "
-        f"backward_ts={result.backward_ts_warnings}"
+        f"backward_ts={result.backward_ts_warnings} "
+        f"wall={wall_s:.0f}s"
     )
+    if hasattr(critic, "stats"):
+        s = critic.stats()
+        if s.get("calls", 0) > 0:
+            cost_str = ""
+            if "total_cost_usd" in s:
+                cost_str = f" cost=${s['total_cost_usd']:.6f}"
+            _log(
+                f"[stats] calls={s['calls']} failures={s['failures']} "
+                f"input_tokens={s['input_tokens']:,} "
+                f"cached_tokens={s['cached_tokens']:,} "
+                f"({s['cache_hit_pct']}% hit) "
+                f"output_tokens={s['output_tokens']:,}"
+                f"{cost_str}"
+            )
     return 0
 
 
@@ -457,6 +476,15 @@ def _try_anthropic_client():
         return anthropic.Anthropic()
     except Exception:
         return None
+
+
+def _critic_label(ns: argparse.Namespace) -> str:
+    """Human-readable label for the critic being used."""
+    if getattr(ns, "config", None) is not None:
+        from hunch.backend.config import load_config
+        full = load_config(ns.config)
+        return f"{full.backend.type}:{full.backend.model} (via {ns.config.name})"
+    return ns.critic
 
 
 def _resolve_critic_factory(name: str, log, config_path: Path | None = None):
