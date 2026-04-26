@@ -69,8 +69,11 @@ The `--config` flag points to a TOML file that controls which model to use, how 
 | Config | Model | Provider | API key needed |
 |--------|-------|----------|----------------|
 | `configs/sonnet_claude_cli.toml` | Claude Sonnet | Claude CLI | No (uses your subscription) |
+| `configs/sonnet_anthropic_sdk.toml` | Claude Sonnet | Anthropic API | `ANTHROPIC_API_KEY` |
+| `configs/sonnet_openrouter.toml` | Claude Sonnet | OpenRouter → Anthropic | `OPENROUTER_API_KEY` |
 | `configs/deepseek_v4_openrouter.toml` | DeepSeek V4 Pro | OpenRouter → SiliconFlow | `OPENROUTER_API_KEY` |
 | `configs/gemma4_31b_openrouter.toml` | Gemma 4 31B | OpenRouter → Parasail | `OPENROUTER_API_KEY` |
+| `configs/gemini_pro_openrouter.toml` | Gemini 3.1 Pro Preview | OpenRouter → Google AI Studio | `OPENROUTER_API_KEY` |
 
 For OpenRouter models, set your API key first (get one at [openrouter.ai/keys](https://openrouter.ai/keys)):
 
@@ -310,11 +313,14 @@ By default, `configs/sonnet_claude_cli.toml` calls the Critic via `claude --prin
 Reasons you might want a different config:
 
 - **Other models** — DeepSeek V4 Pro, Gemma 4 31B, or any model on OpenRouter. Set `OPENROUTER_API_KEY` and use the appropriate config file.
-- **Prompt caching** — both the Anthropic API and OpenRouter providers support prompt caching, which can reduce cost by ~90% on long sessions. OpenRouter's caching is transparent on supported providers (SiliconFlow for DeepSeek, Parasail for Gemma). The Anthropic API also caches automatically for long prompts. The end-of-run stats show cache hit rate so you can verify it's working.
+- **Prompt caching** — the Anthropic API, and OpenRouter providers that support it, use prompt caching to reuse the stable prefix across ticks. This can reduce cost by ~90% on long sessions. The engine automatically splits the prompt into a cached prefix and a varying suffix. The end-of-run stats show cache hit rate so you can verify it's working.
 - **Cost visibility** — OpenRouter-based runs report exact USD cost at the end.
 - **Rate limits** — the Claude CLI subscription shares your hourly quota with your interactive Claude Code session. A separate API key gives the Critic its own quota.
 
-To use the Anthropic SDK directly (no OpenRouter), set `ANTHROPIC_API_KEY` in your environment. You can write an `anthropic_sdk` config (see below) or use the legacy `--critic sonnet` shorthand.
+There are three ways to run Sonnet specifically:
+- `sonnet_claude_cli.toml` — uses `claude --print`, no API key, but shares your subscription quota and has a 180s rate limit.
+- `sonnet_anthropic_sdk.toml` — uses the Anthropic Python SDK directly. Set `ANTHROPIC_API_KEY`. Explicit prompt caching, own quota.
+- `sonnet_openrouter.toml` — routes through OpenRouter to Anthropic. Set `OPENROUTER_API_KEY`. Same pricing as direct API, with cost tracking and caching.
 
 ### Writing a custom config
 

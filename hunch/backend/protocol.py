@@ -20,5 +20,10 @@ class Backend(Protocol):
 
     Each implementation owns its own caching strategy, retry logic,
     and authentication. The engine only sees call().
+
+    cache_break: optional character offset into prompt. Everything
+    before this index is a stable prefix (cacheable); everything
+    from this index onward is new content. Backends that support
+    explicit cache_control use this to split the prompt.
     """
-    def call(self, prompt: str) -> ModelResponse: ...
+    def call(self, prompt: str, cache_break: int | None = None) -> ModelResponse: ...

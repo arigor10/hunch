@@ -45,6 +45,8 @@ def load_backend(config: BackendConfig, log=None) -> Backend:
             require_cache=config.extra.get("require_cache", False),
             cache_warmup_ticks=config.extra.get("cache_warmup_ticks", 2),
             provider_order=config.extra.get("provider_order"),
+            use_cache_control=config.extra.get("use_cache_control", False),
+            cache_min_tokens=config.extra.get("cache_min_tokens", 0),
             log=log,
         )
 

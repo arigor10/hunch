@@ -19,7 +19,7 @@ class ClaudeCliBackend:
     model: str = "claude-sonnet-4-5-20250929"
     timeout_s: float = 600.0
 
-    def call(self, prompt: str) -> ModelResponse:
+    def call(self, prompt: str, cache_break: int | None = None) -> ModelResponse:
         result = subprocess.run(
             [
                 "claude",

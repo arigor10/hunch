@@ -12,9 +12,9 @@ from hunch.backend.protocol import ModelResponse
 class AnthropicSdkBackend:
     """Backend that calls the Anthropic Python SDK directly.
 
-    Caching: the SDK supports cache_control blocks in messages.
-    For now we send plain text prompts and let Anthropic's automatic
-    prompt caching handle prefix reuse.
+    Caching: when cache_break is provided, the prompt is split into
+    two content blocks — the stable prefix with cache_control and
+    the varying suffix without — for explicit prefix caching.
     """
     model: str = "claude-sonnet-4-5-20250929"
     max_tokens: int = 1024
@@ -26,17 +26,25 @@ class AnthropicSdkBackend:
             import anthropic
             self.client = anthropic.Anthropic()
 
-    def call(self, prompt: str) -> ModelResponse:
+    def call(self, prompt: str, cache_break: int | None = None) -> ModelResponse:
+        if cache_break and cache_break < len(prompt):
+            content: Any = [
+                {"type": "text", "text": prompt[:cache_break],
+                 "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": prompt[cache_break:]},
+            ]
+        else:
+            content = prompt
         response = self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": content}],
         )
-        content = getattr(response, "content", None) or []
+        resp_content = getattr(response, "content", None) or []
         text = ""
-        if content:
-            first = content[0]
+        if resp_content:
+            first = resp_content[0]
             t = getattr(first, "text", None)
             if isinstance(t, str):
                 text = t

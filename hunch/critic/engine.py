@@ -126,6 +126,7 @@ class CriticEngine:
     _total_cached_tokens: int = field(default=0, init=False, repr=False)
     _total_calls: int = field(default=0, init=False, repr=False)
     _total_failures: int = field(default=0, init=False, repr=False)
+    _prev_prompt_len: int = field(default=0, init=False, repr=False)
 
     # ------------------------------------------------------------------
     # Critic protocol
@@ -172,6 +173,7 @@ class CriticEngine:
         purged = 0
         if self._stream.should_purge():
             purged = self._stream.purge()
+            self._prev_prompt_len = 0
 
         prompt = self._stream.render()
         projected = self._stream.projected_tokens()
@@ -187,7 +189,8 @@ class CriticEngine:
             return []
 
         try:
-            response: ModelResponse = self.backend.call(prompt)
+            cache_break = self._prev_prompt_len or None
+            response: ModelResponse = self.backend.call(prompt, cache_break=cache_break)
         except Exception as e:
             self._consecutive_failures += 1
             self._total_failures += 1
@@ -204,6 +207,7 @@ class CriticEngine:
 
         self._consecutive_failures = 0
         self._total_calls += 1
+        self._prev_prompt_len = len(prompt)
         text = response.text
         input_tokens = response.input_tokens
         if input_tokens:

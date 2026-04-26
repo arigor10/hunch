@@ -1,0 +1,13 @@
+[backend]
+type = "anthropic_sdk"
+model = "claude-sonnet-4-5-20250929"
+
+[backend.params]
+max_tokens = 8192
+temperature = 0.0
+
+[engine]
+low_watermark = 140000
+high_watermark = 180000
+max_consecutive_failures = 3
+min_tick_interval_s = 5

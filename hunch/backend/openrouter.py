@@ -31,6 +31,8 @@ class OpenRouterBackend:
     require_cache: bool = False
     cache_warmup_ticks: int = 2
     provider_order: list[str] | None = None
+    use_cache_control: bool = False
+    cache_min_tokens: int = 0
     log: Any = field(default=None, repr=False)
 
     _client: Any = field(default=None, init=False, repr=False)
@@ -51,7 +53,7 @@ class OpenRouterBackend:
             base_url="https://openrouter.ai/api/v1",
         )
 
-    def call(self, prompt: str) -> ModelResponse:
+    def call(self, prompt: str, cache_break: int | None = None) -> ModelResponse:
         last_err: Exception | None = None
         backoff = self.initial_backoff_s
 
@@ -63,9 +65,23 @@ class OpenRouterBackend:
                         "order": self.provider_order,
                         "allow_fallbacks": False,
                     }
+                if self.use_cache_control and cache_break and cache_break < len(prompt):
+                    content: Any = [
+                        {"type": "text", "text": prompt[:cache_break],
+                         "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": prompt[cache_break:]},
+                    ]
+                elif self.use_cache_control:
+                    content = [{
+                        "type": "text",
+                        "text": prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }]
+                else:
+                    content = prompt
                 completion = self._client.chat.completions.create(
                     model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[{"role": "user", "content": content}],
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
                     timeout=self.timeout_s,
@@ -102,6 +118,7 @@ class OpenRouterBackend:
                 if (self.require_cache
                         and attempt == 1
                         and self._call_count > self.cache_warmup_ticks
+                        and (input_tokens or 0) >= self.cache_min_tokens
                         and (cached_tokens is None or cached_tokens == 0)):
                     raise RuntimeError(
                         f"Cache miss on call {self._call_count} "

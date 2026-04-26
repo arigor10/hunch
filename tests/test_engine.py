@@ -31,7 +31,7 @@ class FakeBackend:
         self.calls = 0
         self.last_prompt: str | None = None
 
-    def call(self, prompt: str) -> ModelResponse:
+    def call(self, prompt: str, cache_break: int | None = None) -> ModelResponse:
         self.calls += 1
         self.last_prompt = prompt
         if self.error is not None:
@@ -191,7 +191,7 @@ class TestCriticEngine:
             calls = 0
             last_prompt = None
 
-            def call(self, prompt):
+            def call(self, prompt, cache_break=None):
                 self.calls += 1
                 self.last_prompt = prompt
                 if self.calls == 1:
