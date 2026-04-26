@@ -38,6 +38,7 @@ class EngineConfig:
     high_watermark: int = 180_000
     max_consecutive_failures: int = 3
     prompt_path: str | None = None
+    min_tick_interval_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ def load_config(path: Path) -> FullConfig:
         high_watermark=eng_raw.get("high_watermark", 180_000),
         max_consecutive_failures=eng_raw.get("max_consecutive_failures", 3),
         prompt_path=eng_raw.get("prompt_path"),
+        min_tick_interval_s=eng_raw.get("min_tick_interval_s", 0.0),
     )
 
     return FullConfig(backend=backend, engine=engine)

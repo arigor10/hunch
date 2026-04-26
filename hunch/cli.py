@@ -399,10 +399,16 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
     critic = critic_factory()
     critic_label = _critic_label(ns)
     trigger_cfg = TriggerV1Config(min_debounce_s=ns.min_debounce_s)
+
+    tick_interval = ns.min_tick_interval_s
+    if tick_interval == 0.0 and ns.config is not None:
+        from hunch.backend.config import load_config as _load_config
+        tick_interval = _load_config(ns.config).engine.min_tick_interval_s
+
     t0 = _time.monotonic()
     try:
         if ns.claude_log is not None:
-            rate_msg = f"  rate-limit={ns.min_tick_interval_s}s" if ns.min_tick_interval_s > 0 else ""
+            rate_msg = f"  rate-limit={tick_interval}s" if tick_interval > 0 else ""
             _log(
                 f"hunch replay-offline: parse {ns.claude_log} → "
                 f"{replay_dir}  critic={critic_label}"
@@ -420,10 +426,10 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
                 max_events=ns.max_events,
                 hunch_filter=hunch_filter,
                 output_dir=output_dir,
-                min_tick_interval_s=ns.min_tick_interval_s,
+                min_tick_interval_s=tick_interval,
             )
         else:
-            rate_msg = f"  rate-limit={ns.min_tick_interval_s}s" if ns.min_tick_interval_s > 0 else ""
+            rate_msg = f"  rate-limit={tick_interval}s" if tick_interval > 0 else ""
             _log(
                 f"hunch replay-offline: from-dir {replay_dir}"
                 f"  critic={critic_label}  debounce={ns.min_debounce_s}s"
@@ -439,7 +445,7 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
                 max_events=ns.max_events,
                 hunch_filter=hunch_filter,
                 output_dir=output_dir,
-                min_tick_interval_s=ns.min_tick_interval_s,
+                min_tick_interval_s=tick_interval,
             )
     except (RuntimeError, FileNotFoundError) as e:
         sys.stderr.write(f"hunch replay-offline: {e}\n")

@@ -19,3 +19,4 @@ provider_order = ["SiliconFlow"]
 low_watermark = 140000
 high_watermark = 180000
 max_consecutive_failures = 3
+min_tick_interval_s = 60
