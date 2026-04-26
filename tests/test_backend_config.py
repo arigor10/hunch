@@ -92,6 +92,66 @@ env_file = "{env_file}"
 """))
         assert cfg.backend.api_key == "from-file"
 
+    def test_env_file_quoted_values(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("Q_KEY", raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text('Q_KEY="my-secret-key"\n')
+        cfg = load_config(_write_toml(tmp_path, f"""
+[backend]
+type = "openrouter"
+model = "test"
+
+[backend.auth]
+env_var = "Q_KEY"
+env_file = "{env_file}"
+"""))
+        assert cfg.backend.api_key == "my-secret-key"
+
+    def test_env_file_single_quoted(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SQ_KEY", raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text("SQ_KEY='single-quoted'\n")
+        cfg = load_config(_write_toml(tmp_path, f"""
+[backend]
+type = "openrouter"
+model = "test"
+
+[backend.auth]
+env_var = "SQ_KEY"
+env_file = "{env_file}"
+"""))
+        assert cfg.backend.api_key == "single-quoted"
+
+    def test_env_file_export_prefix(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("EX_KEY", raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text("export EX_KEY=exported-value\n")
+        cfg = load_config(_write_toml(tmp_path, f"""
+[backend]
+type = "openrouter"
+model = "test"
+
+[backend.auth]
+env_var = "EX_KEY"
+env_file = "{env_file}"
+"""))
+        assert cfg.backend.api_key == "exported-value"
+
+    def test_env_file_inline_comment(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CM_KEY", raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text("CM_KEY=the-value # this is a comment\n")
+        cfg = load_config(_write_toml(tmp_path, f"""
+[backend]
+type = "openrouter"
+model = "test"
+
+[backend.auth]
+env_var = "CM_KEY"
+env_file = "{env_file}"
+"""))
+        assert cfg.backend.api_key == "the-value"
+
     def test_extra_params_preserved(self, tmp_path):
         cfg = load_config(_write_toml(tmp_path, """
 [backend]

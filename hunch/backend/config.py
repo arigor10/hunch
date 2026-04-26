@@ -93,11 +93,25 @@ def load_config(path: Path) -> FullConfig:
 
 
 def _read_env_file(path: Path, key: str) -> str | None:
-    """Read a key=value from a .env file."""
+    """Read a key=value from a .env file.
+
+    Handles: export prefixes, quoted values, inline comments.
+    """
     if not path.exists():
         return None
     for line in path.read_text().splitlines():
         line = line.strip()
-        if line.startswith(f"{key}="):
-            return line.split("=", 1)[1]
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if not line.startswith(f"{key}="):
+            continue
+        val = line.split("=", 1)[1].strip()
+        if (val.startswith('"') and val.endswith('"')) or \
+           (val.startswith("'") and val.endswith("'")):
+            val = val[1:-1]
+        if "#" in val:
+            val = val[:val.index("#")].rstrip()
+        return val
     return None
