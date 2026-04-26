@@ -72,6 +72,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "sonnet = accumulating v0.1 (shells out to `claude --print`). "
         "sonnet-dry = v0.1 with no model call (logs prompt sizes only).",
     )
+    run.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="TOML config file for a model backend. When provided, "
+        "overrides --critic (uses CriticEngine with the configured backend).",
+    )
 
     ini = sub.add_parser(
         "init",
@@ -170,6 +177,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "sonnet = accumulating v0.1. sonnet-dry = v0.1 with no model "
         "call.",
     )
+    rpo.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="TOML config file for a model backend. When provided, "
+        "overrides --critic (uses CriticEngine with the configured backend).",
+    )
     rpo.add_argument("--min-debounce-s", type=float, default=300.0)
     rpo.add_argument(
         "--max-events",
@@ -264,7 +278,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
 
     trigger_cfg = TriggerV1Config(min_debounce_s=ns.min_debounce_s)
 
-    critic_factory = _resolve_critic_factory(ns.critic, _log)
+    critic_factory = _resolve_critic_factory(ns.critic, _log, config_path=ns.config)
     filter_enabled = not ns.no_filter
     client = _try_anthropic_client() if filter_enabled else None
     config = RunConfig(
@@ -380,15 +394,24 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
         existing = read_current_hunches(existing_hunches_path)
         hunch_filter.init_from_existing(existing)
 
-    critic_factory = _resolve_critic_factory(ns.critic, _log)
+    import time as _time
+    critic_factory = _resolve_critic_factory(ns.critic, _log, config_path=ns.config)
     critic = critic_factory()
+    critic_label = _critic_label(ns)
     trigger_cfg = TriggerV1Config(min_debounce_s=ns.min_debounce_s)
+
+    tick_interval = ns.min_tick_interval_s
+    if tick_interval == 0.0 and ns.config is not None:
+        from hunch.backend.config import load_config as _load_config
+        tick_interval = _load_config(ns.config).engine.min_tick_interval_s
+
+    t0 = _time.monotonic()
     try:
         if ns.claude_log is not None:
-            rate_msg = f"  rate-limit={ns.min_tick_interval_s}s" if ns.min_tick_interval_s > 0 else ""
+            rate_msg = f"  rate-limit={tick_interval}s" if tick_interval > 0 else ""
             _log(
                 f"hunch replay-offline: parse {ns.claude_log} → "
-                f"{replay_dir}  critic={ns.critic}"
+                f"{replay_dir}  critic={critic_label}"
                 f"  debounce={ns.min_debounce_s}s"
                 f"  filter={'on' if filter_enabled else 'off'}"
                 f"{rate_msg}"
@@ -403,13 +426,13 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
                 max_events=ns.max_events,
                 hunch_filter=hunch_filter,
                 output_dir=output_dir,
-                min_tick_interval_s=ns.min_tick_interval_s,
+                min_tick_interval_s=tick_interval,
             )
         else:
-            rate_msg = f"  rate-limit={ns.min_tick_interval_s}s" if ns.min_tick_interval_s > 0 else ""
+            rate_msg = f"  rate-limit={tick_interval}s" if tick_interval > 0 else ""
             _log(
                 f"hunch replay-offline: from-dir {replay_dir}"
-                f"  critic={ns.critic}  debounce={ns.min_debounce_s}s"
+                f"  critic={critic_label}  debounce={ns.min_debounce_s}s"
                 f"  filter={'on' if filter_enabled else 'off'}"
                 f"{rate_msg}"
                 f"\n  output → {output_dir}"
@@ -422,17 +445,33 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
                 max_events=ns.max_events,
                 hunch_filter=hunch_filter,
                 output_dir=output_dir,
-                min_tick_interval_s=ns.min_tick_interval_s,
+                min_tick_interval_s=tick_interval,
             )
     except (RuntimeError, FileNotFoundError) as e:
         sys.stderr.write(f"hunch replay-offline: {e}\n")
         return 1
+    wall_s = _time.monotonic() - t0
     _log(
         f"[replay] done: events={result.events_consumed} "
         f"ticks={result.ticks_fired} "
         f"hunches={result.hunches_emitted} "
-        f"backward_ts={result.backward_ts_warnings}"
+        f"backward_ts={result.backward_ts_warnings} "
+        f"wall={wall_s:.0f}s"
     )
+    if hasattr(critic, "stats"):
+        s = critic.stats()
+        if s.get("calls", 0) > 0:
+            cost_str = ""
+            if "total_cost_usd" in s:
+                cost_str = f" cost=${s['total_cost_usd']:.6f}"
+            _log(
+                f"[stats] calls={s['calls']} failures={s['failures']} "
+                f"input_tokens={s['input_tokens']:,} "
+                f"cached_tokens={s['cached_tokens']:,} "
+                f"({s['cache_hit_pct']}% hit) "
+                f"output_tokens={s['output_tokens']:,}"
+                f"{cost_str}"
+            )
     return 0
 
 
@@ -445,8 +484,33 @@ def _try_anthropic_client():
         return None
 
 
-def _resolve_critic_factory(name: str, log):
-    """Map a --critic name to a zero-arg factory that builds a Critic."""
+def _critic_label(ns: argparse.Namespace) -> str:
+    """Human-readable label for the critic being used."""
+    if getattr(ns, "config", None) is not None:
+        from hunch.backend.config import load_config
+        full = load_config(ns.config)
+        return f"{full.backend.type}:{full.backend.model} (via {ns.config.name})"
+    return ns.critic
+
+
+def _resolve_critic_factory(name: str, log, config_path: Path | None = None):
+    """Map a --critic name (or --config path) to a zero-arg factory."""
+    if config_path is not None:
+        from hunch.backend import load_backend, load_config
+        from hunch.critic.engine import CriticEngine, CriticEngineConfig
+
+        full = load_config(config_path)
+        def _factory():
+            backend = load_backend(full.backend, log=log)
+            engine_config = CriticEngineConfig(
+                prompt_path=Path(full.engine.prompt_path) if full.engine.prompt_path else None,
+                low_watermark=full.engine.low_watermark,
+                high_watermark=full.engine.high_watermark,
+                max_consecutive_failures=full.engine.max_consecutive_failures,
+            )
+            return CriticEngine(backend=backend, config=engine_config, log=log)
+        return _factory
+
     if name == "stub":
         from hunch.critic.stub import StubCritic
         return StubCritic

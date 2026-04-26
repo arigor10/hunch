@@ -1,0 +1,12 @@
+[backend]
+type = "claude_cli"
+model = "claude-sonnet-4-5-20250929"
+
+[backend.params]
+timeout_s = 600
+
+[engine]
+low_watermark = 140000
+high_watermark = 180000
+max_consecutive_failures = 3
+min_tick_interval_s = 180
