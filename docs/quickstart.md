@@ -24,6 +24,12 @@ cd hunch
 pip install -e .
 ```
 
+To use non-Anthropic models via OpenRouter (DeepSeek, Gemma, etc.):
+
+```bash
+pip install -e ".[openrouter]"
+```
+
 Verify: `hunch --help` should print the available subcommands.
 
 ## Setup (once per project)
@@ -69,6 +75,31 @@ The framework is now tailing the Claude Code transcript. It will fire the Critic
 - **`[tick t-XXXX] N hunch(es) emitted (3.2s)`** — the Critic returned. N hunches were emitted (0 is normal — most ticks produce nothing). The time shown is how long the model call took.
 - **`  - h-XXXX some smell description`** — a hunch was emitted. It will appear in the side panel and be injected into the Researcher's next prompt.
 
+
+### Using a different model
+
+Instead of `--critic sonnet` (which shells out to `claude --print`), you can use any model via a TOML config file:
+
+```bash
+hunch run --config configs/deepseek_v4_openrouter.toml
+```
+
+Available configs:
+
+| Config | Model | Provider |
+|--------|-------|----------|
+| `configs/sonnet_claude_cli.toml` | Claude Sonnet | Claude CLI (no API key) |
+| `configs/deepseek_v4_openrouter.toml` | DeepSeek V4 Pro | OpenRouter → SiliconFlow |
+| `configs/gemma4_31b_openrouter.toml` | Gemma 4 31B | OpenRouter → Parasail |
+
+OpenRouter configs require `OPENROUTER_API_KEY` in your environment. Get one at [openrouter.ai/keys](https://openrouter.ai/keys).
+
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+hunch run --config configs/deepseek_v4_openrouter.toml
+```
+
+Config files control the model, provider routing, caching, watermarks, and retry behavior. See the TOML files in `configs/` for the full set of knobs. You can write your own for any model available on OpenRouter.
 
 ## Reviewing hunches
 
@@ -164,6 +195,15 @@ hunch replay-offline \
   --critic sonnet
 ```
 
+Or with a config file (e.g. to run DeepSeek as the Critic):
+
+```bash
+hunch replay-offline \
+  --replay-dir /path/to/project/.hunch/replay \
+  --output-dir /path/to/project/.hunch/eval/deepseek_run01 \
+  --config configs/deepseek_v4_openrouter.toml
+```
+
 The replay directory is **read-only** — the Critic reads conversation and artifacts from it but never writes to it. All output goes to `--output-dir`.
 
 #### Case 2: You only have a raw Claude Code transcript
@@ -198,15 +238,18 @@ rm -r /path/to/project/.hunch/eval/run01
 The Critic fires at every turn boundary (when Claude finishes speaking, and you respond, if there was enough of a pause in between), just like the live pipeline. Output looks like:
 
 ```
-hunch replay-offline: from-dir .hunch/replay  critic=sonnet  ...  filter=on
+hunch replay-offline: from-dir .hunch/replay  critic=openrouter:deepseek/deepseek-v4-pro (via deepseek_v4_openrouter.toml)  ...  filter=on
   output → .hunch/eval/run01
-[replay] t-0001 @ event 12 (bookmark 0→12) hunches=0
-[replay] t-0002 @ event 38 (bookmark 12→38) hunches=1
+[replay] t-0001 @ event 12 (bookmark 0→12) hunches=0 (3.2s)
+[replay] t-0002 @ event 38 (bookmark 12→38) hunches=1 (4.1s)
   - h-0001 calibration drift
   [filter] already raised: calibration drift
   - h-0002 [filtered:novelty] calibration drift
-[replay] done: events=412 ticks=15 hunches=8
+[replay] done: events=412 ticks=15 hunches=8 backward_ts=0 wall=182s
+[stats] calls=15 failures=0 input_tokens=245,012 cached_tokens=218,440 (89.2% hit) output_tokens=1,203 cost=$0.014821
 ```
+
+The `[stats]` line shows token usage, cache hit rate, and total cost (for OpenRouter backends). This helps you track spend and verify that prefix caching is working.
 
 ### Reviewing results
 
@@ -229,17 +272,19 @@ hunch annotate-web \
 Opens at `http://localhost:5555`. Click on a hunch to jump to the conversation context where it was raised.
 
 ---
-## Apendix
+## Appendix
 
 ### Useful flags
 
 | Flag | Default | What it does |
 |------|---------|--------------|
-| `--critic sonnet` | `stub` | Use the Sonnet Critic |
+| `--critic sonnet` | `stub` | Use the Sonnet Critic (via `claude --print`) |
+| `--config PATH` | — | Use a TOML config file for the model backend (overrides `--critic`) |
 | `--critic sonnet-dry` | — | Full pipeline, no model call (test wiring + trigger timing) |
 | `--no-filter` | off | Disable dedup + novelty filter (emit all raw hunches) |
 | `--min-debounce-s N` | 300 | Minimum seconds between ticks |
 | `--max-events N` | all | Stop after N events (useful for smoke tests) |
+| `--min-tick-interval-s N` | 0 | Rate limiter: minimum wall-clock seconds between ticks |
 
 ### Dry run first
 
@@ -260,7 +305,8 @@ This runs the full pipeline — parsing, trigger, accumulator, prompt assembly �
 
 | Flag | Default | What it does |
 |------|---------|--------------|
-| `--critic sonnet` | `stub` | Use the accumulating Sonnet Critic |
+| `--critic sonnet` | `stub` | Use the accumulating Sonnet Critic (via `claude --print`) |
+| `--config PATH` | — | Use a TOML config file for the model backend (overrides `--critic`) |
 | `--critic sonnet-dry` | — | Full pipeline, no model call (logs prompt sizes) |
 | `--min-debounce-s N` | 300 | Minimum seconds between Critic ticks |
 | `--poll N` | 1.0 | How often (seconds) to check for new transcript lines |
@@ -271,12 +317,43 @@ This runs the full pipeline — parsing, trigger, accumulator, prompt assembly �
 
 ## When to use an API key?
 
-By default, Hunch calls the Critic via `claude --print`, which uses your Claude subscription. This is the simplest setup — no API key, no billing configuration.
+By default, `--critic sonnet` calls the Critic via `claude --print`, which uses your Claude subscription. This is the simplest setup — no API key, no billing configuration.
 
-Reasons you might want an API key instead:
+Reasons you might want a `--config` instead:
 
-- **Prompt caching** — the Anthropic API supports explicit prompt caching, which can reduce cost by ~90% on long sessions. The `claude --print` path doesn't expose cache control.
-- **Other models** — if you want to use a non-Anthropic model (e.g. Gemini via OpenRouter), you'll need the relevant API key.
+- **Other models** — DeepSeek V4 Pro, Gemma 4 31B, or any model on OpenRouter. Set `OPENROUTER_API_KEY` and use a config file.
+- **Prompt caching** — OpenRouter provides transparent prefix caching on supported providers (SiliconFlow for DeepSeek, Parasail for Gemma). The end-of-run stats show cache hit rate so you can verify it's working.
+- **Cost visibility** — config-based runs report exact USD cost at the end.
 - **Rate limits** — subscription usage shares your hourly quota with your interactive Claude Code session. A separate API key gives the Critic its own quota.
 
-To use an API key, set `ANTHROPIC_API_KEY` in your environment before running `hunch run` or `hunch replay-offline`. The Critic will use the SDK path instead of `claude --print`.
+To use an API key with the Anthropic SDK directly (no OpenRouter), set `ANTHROPIC_API_KEY` in your environment before running `hunch run` or `hunch replay-offline`. The Critic will use the SDK path instead of `claude --print`.
+
+### Writing a custom config
+
+Copy an existing config from `configs/` and adjust:
+
+```toml
+[backend]
+type = "openrouter"          # or "claude_cli", "anthropic_sdk"
+model = "your/model-id"
+
+[backend.auth]
+env_var = "OPENROUTER_API_KEY"
+
+[backend.params]
+max_tokens = 8192
+temperature = 0.0
+timeout_s = 600
+max_retries = 5
+initial_backoff_s = 5.0
+require_cache = true          # abort on cache miss (after warmup)
+cache_warmup_ticks = 2        # allow N uncached ticks before enforcing
+provider_order = ["Provider"]  # pin to a specific OpenRouter provider
+
+[engine]
+low_watermark = 140000
+high_watermark = 180000
+max_consecutive_failures = 3
+```
+
+The `provider_order` field routes to specific OpenRouter providers (e.g. SiliconFlow for DeepSeek caching, Parasail for Gemma caching). Set `require_cache = true` to catch misconfigured caching early — the Critic will abort if it gets a cache miss after the warmup period.
