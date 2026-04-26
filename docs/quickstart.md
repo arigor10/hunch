@@ -143,6 +143,40 @@ hunch run --critic sonnet
 
 **Hunches not appearing in Claude's context** — Check that `hunch init` ran successfully and `.claude/settings.local.json` has both hook entries (UserPromptSubmit and Stop). The UserPromptSubmit hook injects hunches when you send a new message.
 
+## Starting Hunch mid-session
+
+If you start `hunch run` after a session is already underway, the framework captures all historical events into the replay buffer — but the Critic won't raise hunches for them. The trigger only fires on new `claude_stopped` events (when Claude finishes a future turn), so the first tick after startup covers only the delta since `hunch run` began.
+
+To get Critic coverage of the full history, use a two-step approach:
+
+**Step 1 — Run the Critic offline over the existing transcript:**
+
+```bash
+hunch replay-offline \
+  --claude-log ~/.claude/projects/<encoded-project>/abc123.jsonl \
+  --replay-dir .hunch/history-replay \
+  --output-dir .hunch/history-eval \
+  --critic sonnet
+```
+
+This parses the full transcript and fires the Critic at every past turn boundary. Historical hunches land in `.hunch/history-eval/`. Review them with the annotation UI:
+
+```bash
+hunch annotate-web \
+  --replay-dir .hunch/history-replay \
+  --run-dir .hunch/history-eval
+```
+
+**Step 2 — Start live monitoring for new turns:**
+
+```bash
+hunch run --critic sonnet
+```
+
+The live run uses its own fresh `.hunch/replay/` directory and picks up from the current state of the session. New hunches are injected into the Researcher's context as usual.
+
+The two runs are independent: historical hunches are in `.hunch/history-eval/`, live hunches in `.hunch/replay/`. The `UserPromptSubmit` hook only injects from the live dir, so historical hunches won't surface automatically — review them in the annotation UI and act on any that are still relevant.
+
 ---
 
 # Offline evaluation
