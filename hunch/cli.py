@@ -72,6 +72,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "sonnet = accumulating v0.1 (shells out to `claude --print`). "
         "sonnet-dry = v0.1 with no model call (logs prompt sizes only).",
     )
+    run.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="TOML config file for a model backend. When provided, "
+        "overrides --critic (uses CriticEngine with the configured backend).",
+    )
 
     ini = sub.add_parser(
         "init",
@@ -170,6 +177,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "sonnet = accumulating v0.1. sonnet-dry = v0.1 with no model "
         "call.",
     )
+    rpo.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="TOML config file for a model backend. When provided, "
+        "overrides --critic (uses CriticEngine with the configured backend).",
+    )
     rpo.add_argument("--min-debounce-s", type=float, default=300.0)
     rpo.add_argument(
         "--max-events",
@@ -264,7 +278,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
 
     trigger_cfg = TriggerV1Config(min_debounce_s=ns.min_debounce_s)
 
-    critic_factory = _resolve_critic_factory(ns.critic, _log)
+    critic_factory = _resolve_critic_factory(ns.critic, _log, config_path=ns.config)
     filter_enabled = not ns.no_filter
     client = _try_anthropic_client() if filter_enabled else None
     config = RunConfig(
@@ -380,7 +394,7 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
         existing = read_current_hunches(existing_hunches_path)
         hunch_filter.init_from_existing(existing)
 
-    critic_factory = _resolve_critic_factory(ns.critic, _log)
+    critic_factory = _resolve_critic_factory(ns.critic, _log, config_path=ns.config)
     critic = critic_factory()
     trigger_cfg = TriggerV1Config(min_debounce_s=ns.min_debounce_s)
     try:
@@ -445,8 +459,24 @@ def _try_anthropic_client():
         return None
 
 
-def _resolve_critic_factory(name: str, log):
-    """Map a --critic name to a zero-arg factory that builds a Critic."""
+def _resolve_critic_factory(name: str, log, config_path: Path | None = None):
+    """Map a --critic name (or --config path) to a zero-arg factory."""
+    if config_path is not None:
+        from hunch.backend import load_backend, load_config
+        from hunch.critic.engine import CriticEngine, CriticEngineConfig
+
+        full = load_config(config_path)
+        def _factory():
+            backend = load_backend(full.backend, log=log)
+            engine_config = CriticEngineConfig(
+                prompt_path=Path(full.engine.prompt_path) if full.engine.prompt_path else None,
+                low_watermark=full.engine.low_watermark,
+                high_watermark=full.engine.high_watermark,
+                max_consecutive_failures=full.engine.max_consecutive_failures,
+            )
+            return CriticEngine(backend=backend, config=engine_config, log=log)
+        return _factory
+
     if name == "stub":
         from hunch.critic.stub import StubCritic
         return StubCritic
