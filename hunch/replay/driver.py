@@ -484,15 +484,18 @@ def _persist_hunches(
     Returns the number of hunches that passed the filter (emitted)."""
     resolved_ts = ts or _dt.datetime.now(_dt.timezone.utc).isoformat()
 
+    hunch_ids = [writer.allocate_id() for _ in hunches]
+
     if hunch_filter is not None:
-        results = hunch_filter.filter_batch(hunches, bookmark_prev, bookmark_now)
+        results = hunch_filter.filter_batch(
+            hunches, bookmark_prev, bookmark_now, hunch_ids=hunch_ids,
+        )
     else:
         from hunch.filter import FilterResult
         results = [FilterResult(hunch=h, passed=True) for h in hunches]
 
     emitted = 0
-    for fr in results:
-        hid = writer.allocate_id()
+    for fr, hid in zip(results, hunch_ids):
         if fr.passed:
             writer.write_emit(
                 hunch=fr.hunch,
@@ -513,6 +516,7 @@ def _persist_hunches(
                 bookmark_now=bookmark_now,
                 filter_type=fr.filter_type,
                 filter_reason=fr.reason,
+                duplicate_of=fr.duplicate_of,
             )
     return emitted
 

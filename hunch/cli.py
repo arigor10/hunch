@@ -104,7 +104,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ls.add_argument(
         "--all",
         action="store_true",
-        help="include hunches already labeled / dismissed (default: hide)",
+        help="include filtered and already-labeled hunches (default: hide)",
     )
 
     lbl = sub.add_parser(
@@ -541,22 +541,36 @@ def _cmd_list(ns: argparse.Namespace) -> int:
         )
         return 0
 
-    records = read_current_hunches(hunches_path)
+    records = read_current_hunches(
+        hunches_path, include_filtered=ns.all,
+    )
     if not records:
         sys.stdout.write("(no hunches emitted yet)\n")
         return 0
 
     labeled = read_labeled_hunch_ids(replay_dir / "feedback.jsonl")
-    visible = records if ns.all else [r for r in records if r.hunch_id not in labeled]
+    if ns.all:
+        visible = records
+    else:
+        visible = [
+            r for r in records
+            if r.hunch_id not in labeled and not r.filtered
+        ]
 
     if not visible:
         sys.stdout.write(
-            f"(all {len(records)} hunch(es) already labeled — pass --all to see)\n"
+            f"(all {len(records)} hunch(es) already labeled or filtered"
+            f" — pass --all to see)\n"
         )
         return 0
 
     for r in visible:
-        label_marker = f" [{_label_for(r.hunch_id, labeled)}]" if r.hunch_id in labeled else ""
+        label_marker = ""
+        if r.hunch_id in labeled:
+            label_marker = f" [{_label_for(r.hunch_id, labeled)}]"
+        if r.filtered:
+            dup_note = f" of {r.duplicate_of}" if r.duplicate_of else ""
+            label_marker = f" [filtered:{r.filter_type}{dup_note}]"
         sys.stdout.write(f"{r.hunch_id}  ({r.status}){label_marker}  {r.smell}\n")
         if r.description:
             for line in r.description.splitlines():
@@ -581,7 +595,10 @@ def _cmd_label(ns: argparse.Namespace) -> int:
         )
         return 1
 
-    known_ids = {r.hunch_id for r in read_current_hunches(hunches_path)}
+    known_ids = {
+        r.hunch_id
+        for r in read_current_hunches(hunches_path, include_filtered=True)
+    }
     if ns.hunch_id not in known_ids:
         sys.stderr.write(
             f"hunch label: unknown hunch id {ns.hunch_id!r} "

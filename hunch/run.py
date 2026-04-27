@@ -402,11 +402,11 @@ class Runner:
                 f"[tick {tick_id}] {len(hunches)} hunch(es) emitted "
                 f"({elapsed:.1f}s)"
             )
+        hunch_ids = [self.hunches_writer.allocate_id() for _ in hunches]
         filter_results = self.hunch_filter.filter_batch(
-            hunches, bookmark_prev, bookmark_now,
+            hunches, bookmark_prev, bookmark_now, hunch_ids=hunch_ids,
         )
-        for fr in filter_results:
-            hid = self.hunches_writer.allocate_id()
+        for fr, hid in zip(filter_results, hunch_ids):
             if fr.passed:
                 self.hunches_writer.write_emit(
                     hunch=fr.hunch,
@@ -429,6 +429,7 @@ class Runner:
                     bookmark_now=bookmark_now,
                     filter_type=fr.filter_type,
                     filter_reason=fr.reason,
+                    duplicate_of=fr.duplicate_of,
                 )
                 if self.log is not None:
                     self.log(
