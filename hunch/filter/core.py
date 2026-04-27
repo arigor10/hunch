@@ -217,6 +217,21 @@ class HunchFilter:
         default_factory=list, init=False, repr=False,
     )
 
+    def __post_init__(self) -> None:
+        if not self.enabled:
+            return
+        needs_default_llm = (
+            self.dedup_backend is None or self.novelty_backend is None
+        )
+        if needs_default_llm and self.client is None:
+            import shutil
+            if not shutil.which("claude"):
+                raise RuntimeError(
+                    "HunchFilter is enabled but has no LLM backend: "
+                    "no Anthropic client (ANTHROPIC_API_KEY not set), "
+                    "no Backend instances, and 'claude' CLI not found on PATH."
+                )
+
     def init_from_existing(self, existing: list[HunchRecord]) -> None:
         """Seed the dedup window from hunches that were already on disk
         (e.g. from a prior session or earlier ticks in this run)."""

@@ -245,22 +245,7 @@ class CriticEngine:
                 f"input_tokens=0 (skipped estimation update)"
             )
 
-        try:
-            hunches = parse_response(text)
-        except ValueError as e:
-            self._consecutive_failures += 1
-            self._total_failures += 1
-            self._log(
-                f"[critic] parse failed ({self._consecutive_failures}/"
-                f"{self.config.max_consecutive_failures}): {e}"
-            )
-            if self._consecutive_failures >= self.config.max_consecutive_failures:
-                raise RuntimeError(
-                    f"Critic aborting: {self._consecutive_failures} consecutive "
-                    f"failures (last: parse error). Response: {text[:200]}"
-                ) from e
-            return []
-
+        hunches = parse_response(text)
         self._consecutive_failures = 0
         if not hunches:
             self._log("[critic] (no hunches this tick)")
