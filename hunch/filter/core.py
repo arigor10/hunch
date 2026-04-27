@@ -294,6 +294,8 @@ class HunchFilter:
                 self.log(f"  [filter] already raised: {hunch.smell[:60]}")
             return nov
 
+        if self.log:
+            self.log(f"  [filter] passed: {hunch.smell[:60]}")
         return FilterResult(hunch=hunch, passed=True)
 
     # -- internal LLM dispatch -----------------------------------------------
