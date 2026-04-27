@@ -44,8 +44,11 @@ def parse_response(text: str) -> list[Hunch]:
     """Parse the model response into a list of Hunches.
 
     The prompt asks for a raw JSON array. We tolerate accidental code
-    fences and prose-preamble on a best-effort basis — if parsing fails
-    at any level we return `[]` and let the caller log.
+    fences and prose-preamble on a best-effort basis.
+
+    Raises ValueError when the response contains a JSON array marker
+    but can't be parsed — this feeds into the consecutive-failure
+    counter so persistent parse errors abort the run.
     """
     stripped = _strip_fences(text)
     bracket = stripped.find("[")
@@ -54,10 +57,14 @@ def parse_response(text: str) -> list[Hunch]:
     candidate = stripped[bracket:]
     try:
         parsed = json.loads(candidate)
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Model returned unparseable JSON ({e}): {candidate[:200]}"
+        ) from e
     if not isinstance(parsed, list):
-        return []
+        raise ValueError(
+            f"Model returned JSON but not a list: {type(parsed).__name__}"
+        )
 
     hunches: list[Hunch] = []
     for item in parsed:
@@ -175,6 +182,13 @@ class CriticEngine:
             purged = self._stream.purge()
             self._prev_prompt_len = 0
 
+        if not self._stream.timeline:
+            self._log(
+                f"[critic] {tick_id} skipped — empty timeline "
+                f"(window {bookmark_prev}..{bookmark_now})"
+            )
+            return []
+
         prompt = self._stream.render()
         projected = self._stream.projected_tokens()
 
@@ -205,7 +219,6 @@ class CriticEngine:
                 ) from e
             return []
 
-        self._consecutive_failures = 0
         self._total_calls += 1
         self._prev_prompt_len = len(prompt)
         text = response.text
@@ -232,7 +245,23 @@ class CriticEngine:
                 f"input_tokens=0 (skipped estimation update)"
             )
 
-        hunches = parse_response(text)
+        try:
+            hunches = parse_response(text)
+        except ValueError as e:
+            self._consecutive_failures += 1
+            self._total_failures += 1
+            self._log(
+                f"[critic] parse failed ({self._consecutive_failures}/"
+                f"{self.config.max_consecutive_failures}): {e}"
+            )
+            if self._consecutive_failures >= self.config.max_consecutive_failures:
+                raise RuntimeError(
+                    f"Critic aborting: {self._consecutive_failures} consecutive "
+                    f"failures (last: parse error). Response: {text[:200]}"
+                ) from e
+            return []
+
+        self._consecutive_failures = 0
         if not hunches:
             self._log("[critic] (no hunches this tick)")
         return hunches
@@ -349,10 +378,7 @@ class CriticEngine:
         snap_path = self._replay_dir / "artifacts" / snapshot_name
         if not snap_path.exists():
             return ""
-        try:
-            return snap_path.read_text()
-        except OSError:
-            return ""
+        return snap_path.read_text()
 
     # ------------------------------------------------------------------
     # Hunches / labels sync

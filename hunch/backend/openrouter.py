@@ -94,6 +94,7 @@ class OpenRouterBackend:
                 input_tokens: int | None = None
                 output_tokens: int | None = None
                 cached_tokens: int | None = None
+                cost: float | None = None
                 if usage is not None:
                     input_tokens = getattr(usage, "prompt_tokens", None)
                     output_tokens = getattr(usage, "completion_tokens", None)
@@ -106,9 +107,12 @@ class OpenRouterBackend:
 
                 self._call_count += 1
                 if self.log:
+                    cost_str = f" cost=${float(cost):.4f}" if cost is not None else ""
                     self.log(
                         f"[openrouter] prompt_tokens={input_tokens} "
                         f"cached_tokens={cached_tokens}"
+                        f"{cost_str}"
+                        f" total=${self._total_cost:.2f}"
                         + (f" (attempt {attempt})" if attempt > 1 else "")
                     )
 

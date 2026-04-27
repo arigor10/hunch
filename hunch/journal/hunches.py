@@ -105,6 +105,20 @@ class HunchesWriter:
     # Public API
     # -----------------------------------------------------------------
 
+    def _check_id_monotonicity(self, hunch_id: str) -> None:
+        """Raise if the file already contains an ID >= the one we're writing."""
+        m = _HUNCH_ID_RE.match(hunch_id)
+        if not m:
+            return
+        new_num = int(m.group(1))
+        current_max = self._scan_max_id()
+        if current_max >= new_num:
+            raise RuntimeError(
+                f"Hunch ID monotonicity violation: about to write {hunch_id} "
+                f"but file already contains h-{current_max:04d}. "
+                f"Is another process writing to {self.hunches_path}?"
+            )
+
     def allocate_id(self) -> str:
         """Reserve the next `h-NNNN` id. Called by the framework before
         writing an emit event."""
@@ -134,6 +148,7 @@ class HunchesWriter:
         dialogue slice the Critic "saw" — essential for novelty /
         duplicate-detection judges.
         """
+        self._check_id_monotonicity(hunch_id)
         record = hunch_emit_record(
             hunch, hunch_id, ts, emitted_by_tick,
             bookmark_prev=bookmark_prev, bookmark_now=bookmark_now,
@@ -158,6 +173,7 @@ class HunchesWriter:
         Same shape as an emit but with ``type: "filtered"`` and extra
         fields recording why.
         """
+        self._check_id_monotonicity(hunch_id)
         record = hunch_emit_record(
             hunch, hunch_id, ts, emitted_by_tick,
             bookmark_prev=bookmark_prev, bookmark_now=bookmark_now,

@@ -50,12 +50,15 @@ def load_prompt_template(prompt_path: str | Path) -> tuple[str, str]:
     """Split a v1 prompt file into (preamble, suffix) on the inputs marker.
 
     The accumulator inserts its rendered regions between the two halves
-    at render time. If the marker is missing, the whole file becomes the
-    preamble and the suffix is empty — useful for tests.
+    at render time.
     """
     raw = Path(prompt_path).read_text()
+    if not raw.strip():
+        raise ValueError(f"Prompt template is empty: {prompt_path}")
     if INPUTS_MARKER not in raw:
-        return raw.rstrip() + "\n", ""
+        raise ValueError(
+            f"Prompt template missing '{INPUTS_MARKER}' marker: {prompt_path}"
+        )
     head, tail = raw.split(INPUTS_MARKER, 1)
     return head.rstrip() + "\n", tail.lstrip()
 
@@ -347,6 +350,13 @@ class CriticPromptStream:
         if base is not None and old_string in base:
             self._current_artifacts[path] = base.replace(old_string, new_string, 1)
             self._artifact_touched_at[path] = tick_seq
+        elif base is not None:
+            import warnings
+            warnings.warn(
+                f"Artifact edit for {path} at seq {tick_seq}: "
+                f"old_string not found in base ({len(base)} chars)",
+                stacklevel=2,
+            )
         return event
 
     def append_hunch(

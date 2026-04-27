@@ -476,7 +476,14 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
 
 
 def _try_anthropic_client():
-    """Try to create an Anthropic SDK client. Returns None on failure."""
+    """Try to create an Anthropic SDK client. Returns None on failure.
+
+    Checks for ANTHROPIC_API_KEY first — the SDK constructor succeeds
+    without one (lazy init) but every call will fail.
+    """
+    import os
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
     try:
         import anthropic
         return anthropic.Anthropic()

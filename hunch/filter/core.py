@@ -134,7 +134,7 @@ def _call_llm(
     prompt: str,
     model: str,
     client: Any | None,
-    timeout_s: float = 30.0,
+    timeout_s: float = 120.0,
 ) -> str:
     if client is not None:
         return _call_via_sdk(prompt, model, client)
@@ -156,7 +156,7 @@ def _call_via_sdk(prompt: str, model: str, client: Any) -> str:
             return t
         if isinstance(first, dict):
             return str(first.get("text", ""))
-    return ""
+    raise RuntimeError(f"Anthropic SDK returned empty content: {response}")
 
 
 def _call_via_cli(prompt: str, model: str, timeout_s: float) -> str:
@@ -169,7 +169,10 @@ def _call_via_cli(prompt: str, model: str, timeout_s: float) -> str:
         timeout=timeout_s,
     )
     if result.returncode != 0:
-        return ""
+        raise RuntimeError(
+            f"claude --print exited {result.returncode}: "
+            f"{(result.stderr or result.stdout)[:200]}"
+        )
     try:
         envelope = json.loads(result.stdout)
         return envelope.get("result", "")
@@ -305,12 +308,13 @@ class HunchFilter:
                 smell_b=hunch.smell,
                 description_b=hunch.description,
             )
-            try:
-                raw = self._call_dedup(prompt)
-            except Exception:
-                return None
+            raw = self._call_dedup(prompt)
             parsed = _parse_json_response(raw)
-            if parsed and parsed.get("duplicate") is True:
+            if parsed is None:
+                raise ValueError(
+                    f"Dedup filter: unparseable LLM response: {raw[:200]}"
+                )
+            if parsed.get("duplicate") is True:
                 return parsed.get("reasoning", "duplicate of prior hunch")
             return None
 
@@ -350,12 +354,13 @@ class HunchFilter:
             hunch_description=hunch.description,
             dialogue_context=dialogue,
         )
-        try:
-            raw = self._call_novelty(prompt)
-        except Exception:
-            return None
+        raw = self._call_novelty(prompt)
         parsed = _parse_json_response(raw)
-        if parsed and parsed.get("already_raised") is True:
+        if parsed is None:
+            raise ValueError(
+                f"Novelty filter: unparseable LLM response: {raw[:200]}"
+            )
+        if parsed.get("already_raised") is True:
             who = parsed.get("who", "unknown")
             reason = parsed.get("reasoning", f"already raised by {who}")
             return FilterResult(

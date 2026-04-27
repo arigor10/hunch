@@ -306,10 +306,11 @@ def test_filtered_hunch_not_added_to_dedup_window(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# HunchFilter — LLM error resilience
+# HunchFilter — LLM errors and malformed responses must raise
 # ---------------------------------------------------------------------------
 
-def test_llm_error_passes_hunch_through(tmp_path: Path):
+def test_dedup_llm_error_raises(tmp_path: Path):
+    """An LLM call failure during dedup must propagate, not silently pass."""
     class _BrokenClient:
         @property
         def messages(self):
@@ -319,20 +320,64 @@ def test_llm_error_passes_hunch_through(tmp_path: Path):
             raise RuntimeError("API down")
 
     filt = HunchFilter(replay_dir=tmp_path, client=_BrokenClient(), enabled=True)
-    results = filt.filter_batch([_hunch("should pass")], bookmark_prev=0, bookmark_now=5)
-    assert len(results) == 1
-    assert results[0].passed is True
+    filt.init_from_existing([
+        HunchRecord(
+            hunch_id="h-0001", emitted_ts="", emitted_by_tick=1,
+            bookmark_prev=0, bookmark_now=5,
+            smell="prior concern", description="desc",
+            triggering_refs={}, status="pending",
+        ),
+    ])
+    with pytest.raises(RuntimeError, match="API down"):
+        filt.filter_batch([_hunch("new concern")], bookmark_prev=0, bookmark_now=10)
 
 
-def test_unparseable_response_passes_hunch(tmp_path: Path):
+def test_novelty_llm_error_raises(tmp_path: Path):
+    """An LLM call failure during novelty must propagate, not silently pass."""
+    conv = tmp_path / "conversation.jsonl"
+    append_json_line(conv, {
+        "tick_seq": 1, "type": "user_text", "text": "hi",
+    })
+
+    class _BrokenClient:
+        @property
+        def messages(self):
+            return self
+
+        def create(self, **kwargs: Any) -> None:
+            raise RuntimeError("API down")
+
+    filt = HunchFilter(replay_dir=tmp_path, client=_BrokenClient(), enabled=True)
+    with pytest.raises(RuntimeError, match="API down"):
+        filt.filter_batch([_hunch("concern")], bookmark_prev=0, bookmark_now=5)
+
+
+def test_dedup_unparseable_response_raises(tmp_path: Path):
+    """Dedup must raise on malformed JSON, not treat it as 'not a duplicate'."""
+    client = _FakeClient(["not valid json at all"])
+    filt = HunchFilter(replay_dir=tmp_path, client=client, enabled=True)
+    filt.init_from_existing([
+        HunchRecord(
+            hunch_id="h-0001", emitted_ts="", emitted_by_tick=1,
+            bookmark_prev=0, bookmark_now=5,
+            smell="prior concern", description="desc",
+            triggering_refs={}, status="pending",
+        ),
+    ])
+    with pytest.raises(ValueError, match="unparseable"):
+        filt.filter_batch([_hunch("new concern")], bookmark_prev=0, bookmark_now=10)
+
+
+def test_novelty_unparseable_response_raises(tmp_path: Path):
+    """Novelty must raise on malformed JSON, not treat it as 'novel'."""
     conv = tmp_path / "conversation.jsonl"
     append_json_line(conv, {
         "tick_seq": 1, "type": "user_text", "text": "hi",
     })
     client = _FakeClient(["not valid json at all"])
     filt = HunchFilter(replay_dir=tmp_path, client=client, enabled=True)
-    results = filt.filter_batch([_hunch("concern")], bookmark_prev=0, bookmark_now=5)
-    assert results[0].passed is True
+    with pytest.raises(ValueError, match="unparseable"):
+        filt.filter_batch([_hunch("concern")], bookmark_prev=0, bookmark_now=5)
 
 
 # ---------------------------------------------------------------------------
