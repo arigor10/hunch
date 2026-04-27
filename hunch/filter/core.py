@@ -210,6 +210,7 @@ class HunchFilter:
     dedup_backend: Any | None = None
     novelty_backend: Any | None = None
     dedup_window: int = 10
+    max_retries: int = 3
     enabled: bool = True
     log: Callable[[str], None] | None = None
 
@@ -307,6 +308,29 @@ class HunchFilter:
             return self.novelty_backend.call(prompt).text
         return _call_llm(prompt, self.novelty_model, self.client)
 
+    def _call_and_parse(
+        self, call_fn: Callable[[], str], label: str,
+    ) -> dict[str, Any]:
+        """Call an LLM and parse the JSON response, retrying on failure."""
+        last_exc: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                raw = call_fn()
+                parsed = _parse_json_response(raw)
+                if parsed is None:
+                    raise ValueError(
+                        f"{label}: unparseable LLM response: {raw[:200]}"
+                    )
+                return parsed
+            except Exception as exc:
+                last_exc = exc
+                if self.log:
+                    self.log(
+                        f"  [filter] {label} attempt {attempt}/"
+                        f"{self.max_retries} failed: {exc}"
+                    )
+        raise last_exc  # type: ignore[misc]
+
     # -- dedup ---------------------------------------------------------------
 
     def _check_dedup(self, hunch: Hunch) -> FilterResult | None:
@@ -323,12 +347,9 @@ class HunchFilter:
                 smell_b=hunch.smell,
                 description_b=hunch.description,
             )
-            raw = self._call_dedup(prompt)
-            parsed = _parse_json_response(raw)
-            if parsed is None:
-                raise ValueError(
-                    f"Dedup filter: unparseable LLM response: {raw[:200]}"
-                )
+            parsed = self._call_and_parse(
+                lambda: self._call_dedup(prompt), "dedup",
+            )
             if parsed.get("duplicate") is True:
                 return parsed.get("reasoning", "duplicate of prior hunch")
             return None
@@ -369,12 +390,9 @@ class HunchFilter:
             hunch_description=hunch.description,
             dialogue_context=dialogue,
         )
-        raw = self._call_novelty(prompt)
-        parsed = _parse_json_response(raw)
-        if parsed is None:
-            raise ValueError(
-                f"Novelty filter: unparseable LLM response: {raw[:200]}"
-            )
+        parsed = self._call_and_parse(
+            lambda: self._call_novelty(prompt), "novelty",
+        )
         if parsed.get("already_raised") is True:
             who = parsed.get("who", "unknown")
             reason = parsed.get("reasoning", f"already raised by {who}")

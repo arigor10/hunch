@@ -159,33 +159,19 @@ class TestCriticEngine:
         # Now has all 4 events (seq 1,2 user/assistant + seq 3 artifact + seq 4 user)
         assert len(engine._stream.timeline) == 4
 
-    def test_model_failure_swallowed(self, tmp_path):
+    def test_all_retries_fail_raises(self, tmp_path):
+        """When all retry attempts fail, tick raises after exhausting retries."""
         replay = _make_replay(tmp_path)
         backend = FakeBackend(error=RuntimeError("boom"))
         engine = _make_engine(backend=backend, max_consecutive_failures=3)
         engine.init({"replay_dir": str(replay)})
-        hunches = engine.tick("t-0001", 0, 4)
-        assert hunches == []
-        assert engine._consecutive_failures == 1
+        with pytest.raises(RuntimeError, match="3 attempts"):
+            engine.tick("t-0001", 0, 4)
+        assert backend.calls == 3
 
-    def test_consecutive_failures_abort(self, tmp_path):
+    def test_retry_succeeds_after_transient_failure(self, tmp_path):
+        """A transient failure followed by success within the same tick."""
         replay = _make_replay(tmp_path)
-        backend = FakeBackend(error=RuntimeError("boom"))
-        engine = _make_engine(backend=backend, max_consecutive_failures=2)
-        engine.init({"replay_dir": str(replay)})
-        engine.tick("t-0001", 0, 4)  # failure 1 — swallowed
-        with pytest.raises(RuntimeError, match="2 consecutive"):
-            engine.tick("t-0002", 0, 4)  # failure 2 — aborts
-
-    def test_success_resets_failure_count(self, tmp_path):
-        replay = _make_replay(tmp_path)
-        backend = FakeBackend(
-            responses=["error_placeholder", "[]"],
-            error=None,
-        )
-        # First call fails, second succeeds
-        call_count = [0]
-        orig_error = RuntimeError("boom")
 
         class FlakeyBackend:
             calls = 0
@@ -195,15 +181,15 @@ class TestCriticEngine:
                 self.calls += 1
                 self.last_prompt = prompt
                 if self.calls == 1:
-                    raise orig_error
+                    raise RuntimeError("transient")
                 return ModelResponse(text="[]", input_tokens=1000)
 
         backend = FlakeyBackend()
         engine = _make_engine(backend=backend, max_consecutive_failures=3)
         engine.init({"replay_dir": str(replay)})
-        engine.tick("t-0001", 0, 4)  # fails, swallowed
-        assert engine._consecutive_failures == 1
-        engine.tick("t-0002", 0, 4)  # succeeds
+        hunches = engine.tick("t-0001", 0, 4)
+        assert hunches == []
+        assert backend.calls == 2
         assert engine._consecutive_failures == 0
 
     def test_hunch_sync(self, tmp_path):

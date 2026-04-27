@@ -354,7 +354,7 @@ def test_novelty_llm_error_raises(tmp_path: Path):
 
 def test_dedup_unparseable_response_raises(tmp_path: Path):
     """Dedup must raise on malformed JSON, not treat it as 'not a duplicate'."""
-    client = _FakeClient(["not valid json at all"])
+    client = _FakeClient(["garbage"] * 3)
     filt = HunchFilter(replay_dir=tmp_path, client=client, enabled=True)
     filt.init_from_existing([
         HunchRecord(
@@ -374,7 +374,7 @@ def test_novelty_unparseable_response_raises(tmp_path: Path):
     append_json_line(conv, {
         "tick_seq": 1, "type": "user_text", "text": "hi",
     })
-    client = _FakeClient(["not valid json at all"])
+    client = _FakeClient(["garbage"] * 3)
     filt = HunchFilter(replay_dir=tmp_path, client=client, enabled=True)
     with pytest.raises(ValueError, match="unparseable"):
         filt.filter_batch([_hunch("concern")], bookmark_prev=0, bookmark_now=5)
