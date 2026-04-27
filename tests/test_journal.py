@@ -250,6 +250,46 @@ def test_read_current_hunches_skips_malformed_lines(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# HunchesWriter — ID monotonicity guard
+# ---------------------------------------------------------------------------
+
+def test_write_emit_rejects_duplicate_id(tmp_path):
+    """Writing a hunch with an ID that already exists must raise."""
+    hp = tmp_path / "h.jsonl"
+    w = HunchesWriter(hunches_path=hp)
+    h1 = w.allocate_id()
+    w.write_emit(_mk_hunch(), h1, "t1", emitted_by_tick=1, bookmark_prev=0, bookmark_now=5)
+    with pytest.raises(RuntimeError, match="monotonicity violation"):
+        w.write_emit(_mk_hunch(), h1, "t2", emitted_by_tick=2, bookmark_prev=5, bookmark_now=10)
+
+
+def test_write_filtered_rejects_duplicate_id(tmp_path):
+    """Writing a filtered hunch with an ID that already exists must raise."""
+    hp = tmp_path / "h.jsonl"
+    w = HunchesWriter(hunches_path=hp)
+    h1 = w.allocate_id()
+    w.write_emit(_mk_hunch(), h1, "t1", emitted_by_tick=1, bookmark_prev=0, bookmark_now=5)
+    with pytest.raises(RuntimeError, match="monotonicity violation"):
+        w.write_filtered(
+            _mk_hunch(), h1, "t2", emitted_by_tick=2,
+            bookmark_prev=5, bookmark_now=10,
+            filter_type="dedup", filter_reason="dup",
+        )
+
+
+def test_concurrent_writer_detected(tmp_path):
+    """A second writer to the same file is caught on write."""
+    hp = tmp_path / "h.jsonl"
+    w1 = HunchesWriter(hunches_path=hp)
+    w2 = HunchesWriter(hunches_path=hp)
+    h1 = w1.allocate_id()  # h-0001
+    h2 = w2.allocate_id()  # also h-0001 (scanned same empty file)
+    w1.write_emit(_mk_hunch(), h1, "t1", emitted_by_tick=1, bookmark_prev=0, bookmark_now=5)
+    with pytest.raises(RuntimeError, match="monotonicity violation"):
+        w2.write_emit(_mk_hunch(), h2, "t2", emitted_by_tick=2, bookmark_prev=5, bookmark_now=10)
+
+
+# ---------------------------------------------------------------------------
 # FeedbackWriter
 # ---------------------------------------------------------------------------
 

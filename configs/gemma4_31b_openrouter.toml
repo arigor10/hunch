@@ -11,7 +11,7 @@ temperature = 0.0
 timeout_s = 600
 max_retries = 5
 initial_backoff_s = 5.0
-require_cache = true
+require_cache = false
 cache_warmup_ticks = 2
 provider_order = ["Parasail", "Chutes"]
 

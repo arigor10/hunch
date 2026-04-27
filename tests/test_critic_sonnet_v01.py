@@ -231,17 +231,17 @@ def test_tick_returns_parsed_hunches(tmp_path):
     assert fake.calls == 1
 
 
-def test_parse_failure_returns_empty(tmp_path):
+def test_parse_failure_raises(tmp_path):
     replay = _make_replay(tmp_path)
-    fake = FakeClient(default="not json at all")
+    fake = FakeClient(default="[malformed json that won't parse")
     c = SonnetCritic(client=fake)
     c.init({"replay_dir": str(replay)})
 
-    out = c.tick(tick_id="t-0001", bookmark_prev=0, bookmark_now=4)
-    assert out == []
+    with pytest.raises(RuntimeError, match="failed after"):
+        c.tick(tick_id="t-0001", bookmark_prev=0, bookmark_now=4)
 
 
-def test_model_exception_swallowed(tmp_path):
+def test_model_exception_raises(tmp_path):
     class Exploding(FakeClient):
         def __init__(self):
             super().__init__()
@@ -256,8 +256,8 @@ def test_model_exception_swallowed(tmp_path):
     c = SonnetCritic(client=Exploding(), log=logs.append)
     c.init({"replay_dir": str(replay)})
 
-    out = c.tick(tick_id="t-0001", bookmark_prev=0, bookmark_now=4)
-    assert out == []
+    with pytest.raises(RuntimeError, match="failed after"):
+        c.tick(tick_id="t-0001", bookmark_prev=0, bookmark_now=4)
     assert any("model call failed" in line for line in logs)
 
 

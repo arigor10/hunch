@@ -67,6 +67,10 @@ class HunchRecord:
     triggering_refs: dict[str, list[str]]
     status: str
     history: list[dict[str, Any]] = field(default_factory=list)
+    filtered: bool = False
+    filter_type: str = ""
+    filter_reason: str = ""
+    duplicate_of: str | None = None
 
 
 @dataclass
@@ -101,6 +105,20 @@ class HunchesWriter:
     # Public API
     # -----------------------------------------------------------------
 
+    def _check_id_monotonicity(self, hunch_id: str) -> None:
+        """Raise if the file already contains an ID >= the one we're writing."""
+        m = _HUNCH_ID_RE.match(hunch_id)
+        if not m:
+            return
+        new_num = int(m.group(1))
+        current_max = self._scan_max_id()
+        if current_max >= new_num:
+            raise RuntimeError(
+                f"Hunch ID monotonicity violation: about to write {hunch_id} "
+                f"but file already contains h-{current_max:04d}. "
+                f"Is another process writing to {self.hunches_path}?"
+            )
+
     def allocate_id(self) -> str:
         """Reserve the next `h-NNNN` id. Called by the framework before
         writing an emit event."""
@@ -130,6 +148,7 @@ class HunchesWriter:
         dialogue slice the Critic "saw" — essential for novelty /
         duplicate-detection judges.
         """
+        self._check_id_monotonicity(hunch_id)
         record = hunch_emit_record(
             hunch, hunch_id, ts, emitted_by_tick,
             bookmark_prev=bookmark_prev, bookmark_now=bookmark_now,
@@ -147,13 +166,14 @@ class HunchesWriter:
         bookmark_now: int,
         filter_type: str,
         filter_reason: str,
+        duplicate_of: str | None = None,
     ) -> None:
         """Append a filtered event — a hunch the filter suppressed.
 
         Same shape as an emit but with ``type: "filtered"`` and extra
-        fields recording why. Readers that only care about active
-        hunches skip these (they filter on ``type == "emit"``).
+        fields recording why.
         """
+        self._check_id_monotonicity(hunch_id)
         record = hunch_emit_record(
             hunch, hunch_id, ts, emitted_by_tick,
             bookmark_prev=bookmark_prev, bookmark_now=bookmark_now,
@@ -161,6 +181,8 @@ class HunchesWriter:
         record["type"] = "filtered"
         record["filter_type"] = filter_type
         record["filter_reason"] = filter_reason
+        if duplicate_of:
+            record["duplicate_of"] = duplicate_of
         self._append(record)
 
     def write_status_change(
@@ -227,12 +249,21 @@ class HunchesWriter:
 # Fold-on-read
 # ---------------------------------------------------------------------------
 
-def read_current_hunches(hunches_path: str | Path) -> list[HunchRecord]:
+def read_current_hunches(
+    hunches_path: str | Path,
+    *,
+    include_filtered: bool = False,
+) -> list[HunchRecord]:
     """Read `hunches.jsonl` and return current-state records.
 
     Folds events in *file order* (which is append order, which — because
     the writer is single-threaded — is also timestamp order in v0).
     If the file doesn't exist yet, returns `[]`.
+
+    When ``include_filtered`` is True, also returns hunches that were
+    suppressed by the filter (dedup / novelty). These have
+    ``filtered=True`` and carry ``filter_type``, ``filter_reason``, and
+    optionally ``duplicate_of``.
 
     Unknown event types are skipped silently (forward-compatibility:
     future versions may add event types that older readers shouldn't
@@ -262,20 +293,14 @@ def read_current_hunches(hunches_path: str | Path) -> list[HunchRecord]:
             if not hid:
                 continue
 
-            if etype == "emit":
+            if etype == "emit" or (etype == "filtered" and include_filtered):
                 if hid in records:
-                    # Duplicate emit for the same id — keep the first,
-                    # ignore the second. Dedup contract from framework_v0 §3.
                     continue
-                # Legacy emit events (pre-bookmark-field) default to
-                # -1 so readers can tell "unknown" from a real 0.
-                # If either field is missing OR the pair shrinks
-                # (hand-edited / corrupted), treat as unknown rather
-                # than serving a window where now < prev.
                 bp = d.get("bookmark_prev", -1)
                 bn = d.get("bookmark_now", -1)
                 if bp == -1 or bn == -1 or bn < bp:
                     bp = bn = -1
+                is_filtered = etype == "filtered"
                 records[hid] = HunchRecord(
                     hunch_id=hid,
                     emitted_ts=d.get("ts", ""),
@@ -285,7 +310,11 @@ def read_current_hunches(hunches_path: str | Path) -> list[HunchRecord]:
                     smell=d.get("smell", ""),
                     description=d.get("description", ""),
                     triggering_refs=d.get("triggering_refs") or {},
-                    status="pending",
+                    status="filtered" if is_filtered else "pending",
+                    filtered=is_filtered,
+                    filter_type=d.get("filter_type", "") if is_filtered else "",
+                    filter_reason=d.get("filter_reason", "") if is_filtered else "",
+                    duplicate_of=d.get("duplicate_of") if is_filtered else None,
                 )
                 order.append(hid)
             elif etype == "status_change":
@@ -300,6 +329,5 @@ def read_current_hunches(hunches_path: str | Path) -> list[HunchRecord]:
                         "by": d.get("by", ""),
                     }
                 )
-            # Unknown event types: ignored.
 
     return [records[h] for h in order]

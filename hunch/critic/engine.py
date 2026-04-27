@@ -44,8 +44,11 @@ def parse_response(text: str) -> list[Hunch]:
     """Parse the model response into a list of Hunches.
 
     The prompt asks for a raw JSON array. We tolerate accidental code
-    fences and prose-preamble on a best-effort basis — if parsing fails
-    at any level we return `[]` and let the caller log.
+    fences and prose-preamble on a best-effort basis.
+
+    Raises ValueError when the response contains a JSON array marker
+    but can't be parsed — this feeds into the consecutive-failure
+    counter so persistent parse errors abort the run.
     """
     stripped = _strip_fences(text)
     bracket = stripped.find("[")
@@ -54,10 +57,14 @@ def parse_response(text: str) -> list[Hunch]:
     candidate = stripped[bracket:]
     try:
         parsed = json.loads(candidate)
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Model returned unparseable JSON ({e}): {candidate[:200]}"
+        ) from e
     if not isinstance(parsed, list):
-        return []
+        raise ValueError(
+            f"Model returned JSON but not a list: {type(parsed).__name__}"
+        )
 
     hunches: list[Hunch] = []
     for item in parsed:
@@ -175,6 +182,13 @@ class CriticEngine:
             purged = self._stream.purge()
             self._prev_prompt_len = 0
 
+        if not self._stream.timeline:
+            self._log(
+                f"[critic] {tick_id} skipped — empty timeline "
+                f"(window {bookmark_prev}..{bookmark_now})"
+            )
+            return []
+
         prompt = self._stream.render()
         projected = self._stream.projected_tokens()
 
@@ -188,53 +202,71 @@ class CriticEngine:
             )
             return []
 
-        try:
-            cache_break = self._prev_prompt_len or None
-            response: ModelResponse = self.backend.call(prompt, cache_break=cache_break)
-        except Exception as e:
-            self._consecutive_failures += 1
-            self._total_failures += 1
-            self._log(
-                f"[critic] model call failed ({self._consecutive_failures}/"
-                f"{self.config.max_consecutive_failures}): {e}"
-            )
-            if self._consecutive_failures >= self.config.max_consecutive_failures:
-                raise RuntimeError(
-                    f"Critic aborting: {self._consecutive_failures} consecutive "
-                    f"model failures. Last error: {e}"
-                ) from e
-            return []
+        cache_break = self._prev_prompt_len or None
+        last_error: Exception | None = None
 
-        self._consecutive_failures = 0
-        self._total_calls += 1
-        self._prev_prompt_len = len(prompt)
-        text = response.text
-        input_tokens = response.input_tokens
-        if input_tokens:
-            self._total_input_tokens += input_tokens
-        if response.output_tokens:
-            self._total_output_tokens += response.output_tokens
-        if response.cached_tokens:
-            self._total_cached_tokens += response.cached_tokens
+        for attempt in range(1, self.config.max_consecutive_failures + 1):
+            try:
+                response: ModelResponse = self.backend.call(
+                    prompt, cache_break=cache_break,
+                )
+            except Exception as e:
+                last_error = e
+                self._total_failures += 1
+                self._log(
+                    f"[critic] model call failed (attempt {attempt}/"
+                    f"{self.config.max_consecutive_failures}): {e}"
+                )
+                continue
 
-        if input_tokens is not None and input_tokens > 0:
-            pre_proj = projected
-            self._stream.update_observed_tokens(input_tokens)
-            self._log(
-                f"[critic] {tick_id} prompt_chars={len(prompt):,} "
-                f"input_tokens={input_tokens:,} "
-                f"est_tokens={pre_proj:,} "
-                f"err={input_tokens - pre_proj:+,}"
-            )
-        elif input_tokens == 0:
-            self._log(
-                f"[critic] {tick_id} prompt_chars={len(prompt):,} "
-                f"input_tokens=0 (skipped estimation update)"
-            )
+            self._total_calls += 1
+            self._prev_prompt_len = len(prompt)
+            text = response.text
+            input_tokens = response.input_tokens
+            if input_tokens:
+                self._total_input_tokens += input_tokens
+            if response.output_tokens:
+                self._total_output_tokens += response.output_tokens
+            if response.cached_tokens:
+                self._total_cached_tokens += response.cached_tokens
 
-        hunches = parse_response(text)
-        if not hunches:
-            self._log("[critic] (no hunches this tick)")
+            if input_tokens is not None and input_tokens > 0:
+                pre_proj = projected
+                self._stream.update_observed_tokens(input_tokens)
+                self._log(
+                    f"[critic] {tick_id} prompt_chars={len(prompt):,} "
+                    f"input_tokens={input_tokens:,} "
+                    f"est_tokens={pre_proj:,} "
+                    f"err={input_tokens - pre_proj:+,}"
+                )
+            elif input_tokens == 0:
+                self._log(
+                    f"[critic] {tick_id} prompt_chars={len(prompt):,} "
+                    f"input_tokens=0 (skipped estimation update)"
+                )
+
+            try:
+                hunches = parse_response(text)
+            except ValueError as e:
+                last_error = e
+                self._total_failures += 1
+                self._log(
+                    f"[critic] parse failed (attempt {attempt}/"
+                    f"{self.config.max_consecutive_failures}): {e}"
+                )
+                continue
+
+            self._consecutive_failures = 0
+            if not hunches:
+                self._log("[critic] (no hunches this tick)")
+            return hunches
+
+        self._consecutive_failures += 1
+        raise RuntimeError(
+            f"Critic tick {tick_id} failed after "
+            f"{self.config.max_consecutive_failures} attempts. "
+            f"Last error: {last_error}"
+        )
         return hunches
 
     def shutdown(self) -> None:
@@ -349,10 +381,7 @@ class CriticEngine:
         snap_path = self._replay_dir / "artifacts" / snapshot_name
         if not snap_path.exists():
             return ""
-        try:
-            return snap_path.read_text()
-        except OSError:
-            return ""
+        return snap_path.read_text()
 
     # ------------------------------------------------------------------
     # Hunches / labels sync

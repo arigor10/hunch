@@ -44,6 +44,7 @@ class FilterResult:
     passed: bool
     reason: str = ""
     filter_type: str = ""
+    duplicate_of: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +108,8 @@ def _render_dialogue(
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
-DEDUP_MODEL = "claude-haiku-4-5-20251001"
-NOVELTY_MODEL = "claude-sonnet-4-5-20250929"
+DEFAULT_DEDUP_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_NOVELTY_MODEL = "claude-sonnet-4-5-20250929"
 
 
 def _parse_json_response(text: str) -> dict[str, Any] | None:
@@ -133,7 +134,7 @@ def _call_llm(
     prompt: str,
     model: str,
     client: Any | None,
-    timeout_s: float = 30.0,
+    timeout_s: float = 120.0,
 ) -> str:
     if client is not None:
         return _call_via_sdk(prompt, model, client)
@@ -155,7 +156,7 @@ def _call_via_sdk(prompt: str, model: str, client: Any) -> str:
             return t
         if isinstance(first, dict):
             return str(first.get("text", ""))
-    return ""
+    raise RuntimeError(f"Anthropic SDK returned empty content: {response}")
 
 
 def _call_via_cli(prompt: str, model: str, timeout_s: float) -> str:
@@ -168,7 +169,10 @@ def _call_via_cli(prompt: str, model: str, timeout_s: float) -> str:
         timeout=timeout_s,
     )
     if result.returncode != 0:
-        return ""
+        raise RuntimeError(
+            f"claude --print exited {result.returncode}: "
+            f"{(result.stderr or result.stdout)[:200]}"
+        )
     try:
         envelope = json.loads(result.stdout)
         return envelope.get("result", "")
@@ -190,13 +194,23 @@ class HunchFilter:
     Args:
         replay_dir: path to the replay buffer (for reading conversation.jsonl).
         client: optional Anthropic SDK client. None = CLI fallback.
+        dedup_model: model for dedup checks. Defaults to Haiku.
+        novelty_model: model for novelty checks. Defaults to Sonnet.
+        dedup_backend: optional Backend instance for dedup calls.
+            When set, uses this instead of client/CLI.
+        novelty_backend: optional Backend instance for novelty calls.
         dedup_window: max prior hunches to compare against (avoids quadratic).
         enabled: master switch. When False, all hunches pass through.
         log: optional log sink.
     """
     replay_dir: Path
     client: Any | None = None
+    dedup_model: str = DEFAULT_DEDUP_MODEL
+    novelty_model: str = DEFAULT_NOVELTY_MODEL
+    dedup_backend: Any | None = None
+    novelty_backend: Any | None = None
     dedup_window: int = 10
+    max_retries: int = 3
     enabled: bool = True
     log: Callable[[str], None] | None = None
 
@@ -204,12 +218,31 @@ class HunchFilter:
         default_factory=list, init=False, repr=False,
     )
 
+    def __post_init__(self) -> None:
+        if not self.enabled:
+            return
+        needs_default_llm = (
+            self.dedup_backend is None or self.novelty_backend is None
+        )
+        if needs_default_llm and self.client is None:
+            import shutil
+            if not shutil.which("claude"):
+                raise RuntimeError(
+                    "HunchFilter is enabled but has no LLM backend: "
+                    "no Anthropic client (ANTHROPIC_API_KEY not set), "
+                    "no Backend instances, and 'claude' CLI not found on PATH."
+                )
+
     def init_from_existing(self, existing: list[HunchRecord]) -> None:
         """Seed the dedup window from hunches that were already on disk
         (e.g. from a prior session or earlier ticks in this run)."""
         for rec in existing:
             self._prior_hunches.append(
-                _PriorHunch(smell=rec.smell, description=rec.description)
+                _PriorHunch(
+                    hunch_id=rec.hunch_id,
+                    smell=rec.smell,
+                    description=rec.description,
+                )
             )
 
     def filter_batch(
@@ -217,22 +250,32 @@ class HunchFilter:
         hunches: list[Hunch],
         bookmark_prev: int,
         bookmark_now: int,
+        hunch_ids: list[str] | None = None,
     ) -> list[FilterResult]:
         """Filter a batch of hunches (from one tick).
 
         Returns a FilterResult per hunch. Hunches that pass are also
         added to the internal dedup window for future comparisons.
+
+        ``hunch_ids``, when provided, are the pre-allocated ids for each
+        hunch. They are stored in the dedup window so that ``duplicate_of``
+        pointers on future FilterResults are meaningful.
         """
         if not self.enabled:
             return [FilterResult(hunch=h, passed=True) for h in hunches]
 
+        ids = hunch_ids or [""] * len(hunches)
         results: list[FilterResult] = []
-        for hunch in hunches:
+        for hunch, hid in zip(hunches, ids):
             result = self._check_one(hunch, bookmark_prev, bookmark_now)
             results.append(result)
             if result.passed:
                 self._prior_hunches.append(
-                    _PriorHunch(smell=hunch.smell, description=hunch.description)
+                    _PriorHunch(
+                        hunch_id=hid,
+                        smell=hunch.smell,
+                        description=hunch.description,
+                    )
                 )
         return results
 
@@ -251,7 +294,44 @@ class HunchFilter:
                 self.log(f"  [filter] already raised: {hunch.smell[:60]}")
             return nov
 
+        if self.log:
+            self.log(f"  [filter] passed: {hunch.smell[:60]}")
         return FilterResult(hunch=hunch, passed=True)
+
+    # -- internal LLM dispatch -----------------------------------------------
+
+    def _call_dedup(self, prompt: str) -> str:
+        if self.dedup_backend is not None:
+            return self.dedup_backend.call(prompt).text
+        return _call_llm(prompt, self.dedup_model, self.client)
+
+    def _call_novelty(self, prompt: str) -> str:
+        if self.novelty_backend is not None:
+            return self.novelty_backend.call(prompt).text
+        return _call_llm(prompt, self.novelty_model, self.client)
+
+    def _call_and_parse(
+        self, call_fn: Callable[[], str], label: str,
+    ) -> dict[str, Any]:
+        """Call an LLM and parse the JSON response, retrying on failure."""
+        last_exc: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                raw = call_fn()
+                parsed = _parse_json_response(raw)
+                if parsed is None:
+                    raise ValueError(
+                        f"{label}: unparseable LLM response: {raw[:200]}"
+                    )
+                return parsed
+            except Exception as exc:
+                last_exc = exc
+                if self.log:
+                    self.log(
+                        f"  [filter] {label} attempt {attempt}/"
+                        f"{self.max_retries} failed: {exc}"
+                    )
+        raise last_exc  # type: ignore[misc]
 
     # -- dedup ---------------------------------------------------------------
 
@@ -269,12 +349,10 @@ class HunchFilter:
                 smell_b=hunch.smell,
                 description_b=hunch.description,
             )
-            try:
-                raw = _call_llm(prompt, DEDUP_MODEL, self.client)
-            except Exception:
-                return None
-            parsed = _parse_json_response(raw)
-            if parsed and parsed.get("duplicate") is True:
+            parsed = self._call_and_parse(
+                lambda: self._call_dedup(prompt), "dedup",
+            )
+            if parsed.get("duplicate") is True:
                 return parsed.get("reasoning", "duplicate of prior hunch")
             return None
 
@@ -286,6 +364,7 @@ class HunchFilter:
             for future in as_completed(futures):
                 reason = future.result()
                 if reason is not None:
+                    prior = futures[future]
                     for f in futures:
                         f.cancel()
                     return FilterResult(
@@ -293,6 +372,7 @@ class HunchFilter:
                         passed=False,
                         reason=reason,
                         filter_type="dedup",
+                        duplicate_of=prior.hunch_id or None,
                     )
         return None
 
@@ -312,12 +392,10 @@ class HunchFilter:
             hunch_description=hunch.description,
             dialogue_context=dialogue,
         )
-        try:
-            raw = _call_llm(prompt, NOVELTY_MODEL, self.client)
-        except Exception:
-            return None
-        parsed = _parse_json_response(raw)
-        if parsed and parsed.get("already_raised") is True:
+        parsed = self._call_and_parse(
+            lambda: self._call_novelty(prompt), "novelty",
+        )
+        if parsed.get("already_raised") is True:
             who = parsed.get("who", "unknown")
             reason = parsed.get("reasoning", f"already raised by {who}")
             return FilterResult(
@@ -335,5 +413,6 @@ class HunchFilter:
 
 @dataclass(frozen=True)
 class _PriorHunch:
+    hunch_id: str
     smell: str
     description: str

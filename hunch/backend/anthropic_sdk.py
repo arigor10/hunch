@@ -23,6 +23,11 @@ class AnthropicSdkBackend:
 
     def __post_init__(self) -> None:
         if self.client is None:
+            import os
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                raise RuntimeError(
+                    "AnthropicSdkBackend requires ANTHROPIC_API_KEY"
+                )
             import anthropic
             self.client = anthropic.Anthropic()
 

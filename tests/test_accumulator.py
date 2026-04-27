@@ -638,12 +638,11 @@ def test_load_prompt_template_splits_on_marker(tmp_path):
     assert tail.strip() == "FOOTER"
 
 
-def test_load_prompt_template_handles_missing_marker(tmp_path):
+def test_load_prompt_template_rejects_missing_marker(tmp_path):
     p = tmp_path / "prompt.md"
     p.write_text("JUST HEADER\n")
-    head, tail = load_prompt_template(p)
-    assert "JUST HEADER" in head
-    assert tail == ""
+    with pytest.raises(ValueError, match="missing.*marker"):
+        load_prompt_template(p)
 
 
 def test_nose_v1_prompt_loads_with_marker():

@@ -137,10 +137,9 @@ def handle_user_prompt_submit(
             }
         }
         return HookResult(stdout=json.dumps(payload))
-    except Exception:
-        # Hook must never crash the user's prompt. Swallow and
-        # continue — the cost is one missed injection, not a broken
-        # Claude Code session.
+    except Exception as exc:
+        import sys
+        print(f"[hunch prompt hook] error: {exc}", file=sys.stderr)
         return _empty_continue()
 
 

@@ -51,7 +51,9 @@ def handle_stop(
         }
         append_json_line(conversation_path, event)
         return 0
-    except Exception:
+    except Exception as exc:
+        import sys
+        print(f"[hunch stop hook] error: {exc}", file=sys.stderr)
         return 0
 
 

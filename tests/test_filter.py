@@ -306,10 +306,11 @@ def test_filtered_hunch_not_added_to_dedup_window(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# HunchFilter — LLM error resilience
+# HunchFilter — LLM errors and malformed responses must raise
 # ---------------------------------------------------------------------------
 
-def test_llm_error_passes_hunch_through(tmp_path: Path):
+def test_dedup_llm_error_raises(tmp_path: Path):
+    """An LLM call failure during dedup must propagate, not silently pass."""
     class _BrokenClient:
         @property
         def messages(self):
@@ -319,20 +320,64 @@ def test_llm_error_passes_hunch_through(tmp_path: Path):
             raise RuntimeError("API down")
 
     filt = HunchFilter(replay_dir=tmp_path, client=_BrokenClient(), enabled=True)
-    results = filt.filter_batch([_hunch("should pass")], bookmark_prev=0, bookmark_now=5)
-    assert len(results) == 1
-    assert results[0].passed is True
+    filt.init_from_existing([
+        HunchRecord(
+            hunch_id="h-0001", emitted_ts="", emitted_by_tick=1,
+            bookmark_prev=0, bookmark_now=5,
+            smell="prior concern", description="desc",
+            triggering_refs={}, status="pending",
+        ),
+    ])
+    with pytest.raises(RuntimeError, match="API down"):
+        filt.filter_batch([_hunch("new concern")], bookmark_prev=0, bookmark_now=10)
 
 
-def test_unparseable_response_passes_hunch(tmp_path: Path):
+def test_novelty_llm_error_raises(tmp_path: Path):
+    """An LLM call failure during novelty must propagate, not silently pass."""
     conv = tmp_path / "conversation.jsonl"
     append_json_line(conv, {
         "tick_seq": 1, "type": "user_text", "text": "hi",
     })
-    client = _FakeClient(["not valid json at all"])
+
+    class _BrokenClient:
+        @property
+        def messages(self):
+            return self
+
+        def create(self, **kwargs: Any) -> None:
+            raise RuntimeError("API down")
+
+    filt = HunchFilter(replay_dir=tmp_path, client=_BrokenClient(), enabled=True)
+    with pytest.raises(RuntimeError, match="API down"):
+        filt.filter_batch([_hunch("concern")], bookmark_prev=0, bookmark_now=5)
+
+
+def test_dedup_unparseable_response_raises(tmp_path: Path):
+    """Dedup must raise on malformed JSON, not treat it as 'not a duplicate'."""
+    client = _FakeClient(["garbage"] * 3)
     filt = HunchFilter(replay_dir=tmp_path, client=client, enabled=True)
-    results = filt.filter_batch([_hunch("concern")], bookmark_prev=0, bookmark_now=5)
-    assert results[0].passed is True
+    filt.init_from_existing([
+        HunchRecord(
+            hunch_id="h-0001", emitted_ts="", emitted_by_tick=1,
+            bookmark_prev=0, bookmark_now=5,
+            smell="prior concern", description="desc",
+            triggering_refs={}, status="pending",
+        ),
+    ])
+    with pytest.raises(ValueError, match="unparseable"):
+        filt.filter_batch([_hunch("new concern")], bookmark_prev=0, bookmark_now=10)
+
+
+def test_novelty_unparseable_response_raises(tmp_path: Path):
+    """Novelty must raise on malformed JSON, not treat it as 'novel'."""
+    conv = tmp_path / "conversation.jsonl"
+    append_json_line(conv, {
+        "tick_seq": 1, "type": "user_text", "text": "hi",
+    })
+    client = _FakeClient(["garbage"] * 3)
+    filt = HunchFilter(replay_dir=tmp_path, client=client, enabled=True)
+    with pytest.raises(ValueError, match="unparseable"):
+        filt.filter_batch([_hunch("concern")], bookmark_prev=0, bookmark_now=5)
 
 
 # ---------------------------------------------------------------------------
@@ -472,3 +517,161 @@ def test_cross_tick_dedup_in_replay(tmp_path: Path):
     assert len(emits) == 1
     assert len(filtered) == 1
     assert filtered[0]["filter_type"] == "dedup"
+
+
+# ---------------------------------------------------------------------------
+# Online / offline parity
+# ---------------------------------------------------------------------------
+
+# Fields that must match between online and offline hunches.jsonl records.
+# Timestamps and bookmarks may differ (different conversation setup), but
+# everything the filter writes must be identical.
+_PARITY_FIELDS = [
+    "type", "smell", "description", "hunch_id",
+    "filter_type", "filter_reason", "duplicate_of",
+]
+
+
+def _normalize_record(d: dict) -> dict:
+    """Extract only the fields that should be identical across pipelines."""
+    return {k: d.get(k, None) for k in _PARITY_FIELDS}
+
+
+def _parse_hunch_records(hunches_path: Path) -> list[dict]:
+    """Read hunches.jsonl and return non-meta records in order."""
+    records = []
+    for line in hunches_path.read_text().strip().splitlines():
+        d = json.loads(line)
+        if d.get("type") in ("emit", "filtered"):
+            records.append(d)
+    return records
+
+
+def test_online_offline_filter_parity(tmp_path: Path):
+    """Online (Runner) and offline (run_replay_from_dir) paths produce
+    identical hunches.jsonl records for the same critic output and
+    filter responses.
+
+    This catches drift between the two persist loops — e.g. one path
+    forgetting to pass duplicate_of or using different field names.
+    """
+    import datetime as _dt
+    from hunch.replay import run_replay, run_replay_from_dir
+    from hunch.trigger import TriggerV1Config
+    from hunch.run import RunConfig, Runner
+    from hunch.journal.append import append_json_line
+
+    class _TwoHunchCritic:
+        """Always returns one novel + one stale hunch."""
+        def init(self, config): pass
+        def shutdown(self): pass
+        def tick(self, tick_id, bookmark_prev, bookmark_now):
+            return [
+                _hunch("novel concern", "this is genuinely new"),
+                _hunch("stale concern", "scientist already discussed this"),
+            ]
+
+    # Filter responses: hunch 1 passes both checks, hunch 2 fails novelty.
+    def _make_filter_responses() -> list[str]:
+        return [
+            # hunch 1: no priors → skip dedup; novelty → passes
+            '{"already_raised": false, "who": null, "reasoning": "novel"}',
+            # hunch 2: dedup vs hunch 1 → not a dup
+            '{"duplicate": false, "reasoning": "different concerns"}',
+            # hunch 2: novelty → already raised
+            '{"already_raised": true, "who": "scientist", '
+            '"reasoning": "discussed in tick 2"}',
+        ]
+
+    events = [
+        {"type": "user_text",
+         "timestamp": _dt.datetime(2026, 1, 1, 0, 0,
+                                   tzinfo=_dt.timezone.utc).isoformat(),
+         "text": "hi"},
+        {"type": "assistant_text",
+         "timestamp": _dt.datetime(2026, 1, 1, 0, 1,
+                                   tzinfo=_dt.timezone.utc).isoformat(),
+         "text": "hello"},
+        {"type": "user_text",
+         "timestamp": _dt.datetime(2026, 1, 1, 0, 10,
+                                   tzinfo=_dt.timezone.utc).isoformat(),
+         "text": "next"},
+    ]
+    trigger_cfg = TriggerV1Config(min_debounce_s=30.0)
+
+    # ---- OFFLINE path ----
+    offline_replay = tmp_path / "offline_replay"
+    from hunch.critic.stub import StubCritic
+    run_replay(
+        events=events, project_roots=["/tmp"],
+        replay_dir=offline_replay, critic=StubCritic(),
+    )
+    (offline_replay / "hunches.jsonl").unlink(missing_ok=True)
+
+    offline_filter = HunchFilter(
+        replay_dir=offline_replay,
+        client=_FakeClient(_make_filter_responses()),
+        enabled=True,
+    )
+    run_replay_from_dir(
+        replay_dir=offline_replay,
+        critic=_TwoHunchCritic(),
+        trigger_config=trigger_cfg,
+        overwrite_hunches=True,
+        hunch_filter=offline_filter,
+    )
+    offline_records = _parse_hunch_records(offline_replay / "hunches.jsonl")
+
+    # ---- ONLINE path ----
+    online_dir = tmp_path / "online"
+    online_dir.mkdir()
+    transcript = online_dir / "transcript.jsonl"
+    # Minimal Claude Code transcript lines that parse to text events.
+    with open(transcript, "w") as f:
+        f.write(json.dumps({
+            "uuid": "u1",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": "hello"}]},
+            "cwd": "/tmp",
+        }) + "\n")
+
+    config = RunConfig(
+        cwd=online_dir,
+        transcript_path=transcript,
+        replay_dir=online_dir / "replay",
+        poll_s=0.0,
+        critic_factory=_TwoHunchCritic,
+        anthropic_client=_FakeClient(_make_filter_responses()),
+        trigger_config=TriggerV1Config(min_debounce_s=0.0),
+        filter_enabled=True,
+    )
+    runner = Runner(config=config)
+    runner.step_once()  # process assistant text
+
+    # Inject claude_stopped to fire the tick
+    tick_seq = runner.writer.tick_seq + 1
+    append_json_line(runner.writer.conversation_path, {
+        "tick_seq": tick_seq,
+        "type": "claude_stopped",
+        "timestamp": "2026-01-01T00:05:00Z",
+    })
+    runner.step_once()  # fires tick → critic → filter → journal
+    online_records = _parse_hunch_records(
+        online_dir / "replay" / "hunches.jsonl"
+    )
+
+    # ---- COMPARE ----
+    assert len(offline_records) == len(online_records), (
+        f"offline produced {len(offline_records)} records, "
+        f"online produced {len(online_records)}"
+    )
+    for i, (off, on) in enumerate(zip(offline_records, online_records)):
+        off_norm = _normalize_record(off)
+        on_norm = _normalize_record(on)
+        assert off_norm == on_norm, (
+            f"Record {i} differs:\n"
+            f"  offline: {off_norm}\n"
+            f"  online:  {on_norm}"
+        )

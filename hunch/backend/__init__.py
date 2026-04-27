@@ -17,6 +17,10 @@ __all__ = [
 
 def load_backend(config: BackendConfig, log=None) -> Backend:
     """Create a Backend instance from a BackendConfig."""
+    if not config.model:
+        raise ValueError(
+            f"Backend config has empty model name (type={config.type!r})"
+        )
     if config.type == "claude_cli":
         from hunch.backend.claude_cli import ClaudeCliBackend
         return ClaudeCliBackend(
