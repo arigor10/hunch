@@ -15,6 +15,7 @@ class LinkRecord:
     """A hunch from a run that is linked to a bank entry."""
     run: str
     hunch_id: str
+    bookmark_now: int = -1
     judge_score: float | None = None
     source: str = "ingest"
     replaces_bank_id: str | None = None
@@ -40,6 +41,7 @@ class BankEntry:
     canonical_description: str
     source_run: str
     source_hunch_id: str
+    bookmark_now: int
     ts: str
     links: list[LinkRecord] = field(default_factory=list)
     labels: list[LabelRecord] = field(default_factory=list)

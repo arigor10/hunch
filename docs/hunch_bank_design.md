@@ -101,6 +101,7 @@ Written at ingest when a hunch has no match in the existing bank.
   "canonical_description": "In c-0612, the scientist removed attn_implementation='eager'...",
   "source_run": "sp_sonnet_run01",
   "source_hunch_id": "h-0003",
+  "bookmark_now": 42,
   "ts": "2026-04-27T14:30:00Z"
 }
 ```
@@ -108,6 +109,7 @@ Written at ingest when a hunch has no match in the existing bank.
 - `bank_id`: monotonic `hb-NNNN`, allocated at ingest (scan file for max ID on startup).
 - `canonical_smell` / `canonical_description`: the first occurrence's wording, never mutated.
 - `source_run` / `source_hunch_id`: which run's hunch became the canonical entry.
+- `bookmark_now`: replay-buffer position where the hunch was emitted. Used for windowed dedup matching at sync time.
 
 ### `link` — duplicate hunch mapped to an existing bank entry
 
@@ -119,6 +121,7 @@ Written at ingest when a hunch matches an existing bank entry (via LLM dedup jud
   "bank_id": "hb-0001",
   "run": "sp_deepseek_run01",
   "hunch_id": "h-0011",
+  "bookmark_now": 42,
   "judge_score": 0.87,
   "source": "ingest",
   "replaces_bank_id": null,
@@ -325,9 +328,77 @@ Same pattern as the hunch ID monotonicity guard in `HunchesWriter`.
 
 Same pattern as hunch IDs: `hb-NNNN`, 4-digit zero-padded, monotonic. On startup, scan `hunch_bank.jsonl` for the highest existing ID number and allocate from there. Single-writer assumption (same as HunchesWriter).
 
-## Open questions (to be resolved before implementation)
+## Sync operation
 
-- **Sync semantics.** How does `hunch bank sync` discover eval dirs, detect new/interrupted ingests, and resume? Manifest-based or convention-based?
-- **Dedup judge.** Reuse the existing Haiku dedup prompt (`judge_dedup.md`) or adapt it? Windowed comparison (as in `cross_run_dedup.py`) or compare each new hunch against the full bank?
+`hunch bank sync` ingests eval runs into the bank. It discovers runs, dedup-matches new hunches against existing bank entries, creates entries and links, and optionally migrates legacy `labels.jsonl` files.
+
+### Discovery
+
+Sync scans `<project>/.hunch/eval/` for directories matching the pattern `<run_name>/hunches.jsonl`. The directory name is the run name. No recursive scan — only immediate children of `eval/`.
+
+### Per-run sync flow
+
+For each discovered run:
+
+1. **Already ingested?** Check if `bank/runs/<run_name>/hunches.jsonl` exists.
+   - **Yes → conflict check.** Compare the eval dir's `hunches.jsonl` against the bank's copy by `(hunch_id, smell)` tuples. If they differ, warn and skip:
+     ```
+     WARNING: sp_sonnet_run01/hunches.jsonl has changed since ingestion.
+     To replace: `hunch bank drop --run sp_sonnet_run01`, then re-sync.
+     To keep both: rename the eval dir, then re-sync.
+     Skipping.
+     ```
+   - **Yes, same → resume check.** Compare emitted hunch IDs in the file against those already in the bank for this run. Process only missing ones (interrupted ingestion).
+   - **No → fresh ingest.** Copy `hunches.jsonl` to `bank/runs/<run_name>/`, then process all emitted hunches.
+
+2. **Dedup matching.** For each new (unprocessed) hunch, determine if it matches any existing bank entry. See [Dedup strategy](#dedup-strategy).
+
+3. **Write events.** For matched hunches: write `link` events. For unmatched hunches: allocate `hb-NNNN` and write `entry` events.
+
+4. **Legacy labels.jsonl migration.** If `labels.jsonl` exists in the eval dir, prompt the user. See [Legacy labels migration](#legacy-labels-migration).
+
+### Dedup strategy
+
+**Windowed comparison (Option A):** Loop over all non-tombstoned bank entries. For each entry, use its `bookmark_now` to find the ±k nearest hunches in the new run (by `bookmark_now`, via bisect). Compare each pair using the existing Haiku dedup prompt (`judge_dedup.md`). Default k=5 → up to 10 comparisons per bank entry.
+
+**Cost:** `n_bank × 2k` LLM calls. For 150 bank entries × 10 = 1,500 calls at ~$0.10, <2 min with 10 parallel workers. Scales linearly with bank size.
+
+**Why not full comparison:** At 150 bank × 100 new = 15,000 calls, full comparison is 10× more expensive for marginal recall improvement. The windowed approach catches duplicates that occur near the same point in the transcript, which covers the vast majority of cases (same concern triggered by the same evidence).
+
+**bookmark_now on events:** Both `entry` and `link` events carry a `bookmark_now` field recording the replay-buffer position where the hunch was emitted. This enables the windowed comparison.
+
+**Result processing:** After all comparisons, each new hunch has zero or more matches. If matched to one or more bank entries, link to the highest-scoring match. If unmatched, create a new entry.
+
+### Legacy labels migration
+
+When sync finds a `labels.jsonl` in an eval dir, it prompts the user:
+
+```
+Found labels.jsonl in sp_sonnet_run01/ (14 labels).
+Migrating labels to the hunch bank.
+See: docs/hunch_bank_design.md
+
+Labels will be ingested and the file backed up as labels.jsonl.bak
+
+[y] Continue  [n] Abort  [s] Skip this file
+
+To exclude this run entirely, move it out of .hunch/eval/
+```
+
+On confirmation:
+1. Copy `labels.jsonl` → `labels.jsonl.bak` (fault tolerance).
+2. For each label: look up the hunch's `bank_id` from the bank mapping, write a `label` event to the bank with `labeled_by` from the original `source` field (or `"legacy_migration"` if absent).
+3. Rename `labels.jsonl` → `labels.jsonl.bak` (marks as processed).
+
+Pass `--yes` to auto-confirm all migrations (non-interactive).
+
+### Idempotency and resumability
+
+- Running sync twice with no changes = no-op.
+- Interrupted sync: next run detects partially-ingested hunches (some IDs present, others not) and processes only the missing ones. The `hunches.jsonl` copy is written at the start, so it's always complete.
+- A `labels.jsonl.bak` file signals that migration already completed for that run.
+
+## Open questions (deferred)
+
 - **Annotation tool integration.** How does `annotate_web.py` read/write the bank? What changes to the UI for inherited labels?
 - **Feedback.jsonl coexistence.** Live feedback (`good`/`bad`/`skip` from the side panel during `hunch run`) still goes to `feedback.jsonl`. How does it relate to the bank? Ingested as labels at sync time?

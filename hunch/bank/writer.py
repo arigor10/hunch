@@ -45,6 +45,8 @@ class BankWriter:
         source_run: str,
         source_hunch_id: str,
         ts: str,
+        *,
+        bookmark_now: int = -1,
     ) -> None:
         """Append an entry event for a new unique concern."""
         self._append({
@@ -54,6 +56,7 @@ class BankWriter:
             "canonical_description": canonical_description,
             "source_run": source_run,
             "source_hunch_id": source_hunch_id,
+            "bookmark_now": bookmark_now,
             "ts": ts,
         })
 
@@ -64,6 +67,7 @@ class BankWriter:
         hunch_id: str,
         ts: str,
         *,
+        bookmark_now: int = -1,
         judge_score: float | None = None,
         source: str = "ingest",
         replaces_bank_id: str | None = None,
@@ -74,6 +78,7 @@ class BankWriter:
             "bank_id": bank_id,
             "run": run,
             "hunch_id": hunch_id,
+            "bookmark_now": bookmark_now,
             "judge_score": judge_score,
             "source": source,
             "replaces_bank_id": replaces_bank_id,

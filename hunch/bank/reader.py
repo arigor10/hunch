@@ -62,6 +62,7 @@ def _fold_entry(state: BankState, event: dict) -> None:
         canonical_description=event.get("canonical_description", ""),
         source_run=run,
         source_hunch_id=hunch_id,
+        bookmark_now=event.get("bookmark_now", -1),
         ts=event.get("ts", ""),
     )
     state.entries[bank_id] = entry
@@ -80,6 +81,7 @@ def _fold_link(state: BankState, event: dict) -> None:
     link = LinkRecord(
         run=run,
         hunch_id=hunch_id,
+        bookmark_now=event.get("bookmark_now", -1),
         judge_score=event.get("judge_score"),
         source=event.get("source", "ingest"),
         replaces_bank_id=event.get("replaces_bank_id"),

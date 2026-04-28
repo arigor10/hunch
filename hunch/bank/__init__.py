@@ -10,6 +10,7 @@ from hunch.bank.schema import (
 from hunch.bank.writer import BankWriter
 from hunch.bank.reader import read_bank
 from hunch.bank.resolver import resolve_label
+from hunch.bank.sync import sync, migrate_labels, SyncResult, RunSyncResult
 
 __all__ = [
     "BankEntry",
@@ -18,6 +19,10 @@ __all__ = [
     "LabelRecord",
     "LinkRecord",
     "ResolvedLabel",
+    "RunSyncResult",
+    "SyncResult",
+    "migrate_labels",
     "read_bank",
     "resolve_label",
+    "sync",
 ]
