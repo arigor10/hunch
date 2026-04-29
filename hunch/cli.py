@@ -238,6 +238,46 @@ def _build_parser() -> argparse.ArgumentParser:
         help="port for the local server (default: 5555)",
     )
 
+    bank = sub.add_parser("bank", help="manage the project-level hunch bank")
+    bank_sub = bank.add_subparsers(dest="bank_command", metavar="<command>")
+    bank_sync = bank_sub.add_parser(
+        "sync",
+        help="sync eval runs into the bank (dedup + labels)",
+    )
+    bank_sync.add_argument(
+        "--project-dir",
+        type=Path,
+        default=None,
+        help="project directory (default: cwd)",
+    )
+    bank_sync.add_argument(
+        "--run",
+        default=None,
+        help="sync only this run (default: all discovered runs)",
+    )
+    bank_sync.add_argument(
+        "--yes",
+        action="store_true",
+        help="auto-migrate legacy labels.jsonl files",
+    )
+    bank_sync.add_argument(
+        "--window-k",
+        type=int,
+        default=5,
+        help="half-window for dedup comparison (default: 5)",
+    )
+    bank_sync.add_argument(
+        "--max-workers",
+        type=int,
+        default=10,
+        help="parallel workers for LLM judge calls (default: 10)",
+    )
+    bank_sync.add_argument(
+        "--model",
+        default="claude-haiku-4-5-20251001",
+        help="model for dedup judge (default: claude-haiku-4-5-20251001)",
+    )
+
     hook = sub.add_parser("hook", help="Claude Code hook handlers (internal)")
     hook_sub = hook.add_subparsers(dest="hook_name", metavar="<hook>")
     ups = hook_sub.add_parser(
@@ -326,6 +366,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_panel(ns)
     if ns.command == "annotate-web":
         return _cmd_annotate_web(ns)
+    if ns.command == "bank":
+        return _cmd_bank(ns)
     if ns.command == "init":
         return _cmd_init(ns)
     if ns.command == "status":
@@ -472,6 +514,70 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
                 f"output_tokens={s['output_tokens']:,}"
                 f"{cost_str}"
             )
+    return 0
+
+
+def _cmd_bank(ns: argparse.Namespace) -> int:
+    if ns.bank_command == "sync":
+        return _cmd_bank_sync(ns)
+    sys.stderr.write("hunch bank: specify a subcommand (e.g. sync)\n")
+    return 2
+
+
+def _cmd_bank_sync(ns: argparse.Namespace) -> int:
+    from hunch.backend.claude_cli import ClaudeCliBackend
+    from hunch.bank.sync import sync
+    from hunch.filter import make_dedup_judge
+
+    project_dir = (ns.project_dir or Path.cwd()).resolve()
+    bank_dir = project_dir / ".hunch" / "bank"
+    eval_dir = project_dir / ".hunch" / "eval"
+
+    if not eval_dir.is_dir():
+        sys.stderr.write(f"hunch bank sync: no eval dir at {eval_dir}\n")
+        return 1
+
+    def _log(msg: str) -> None:
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+
+    backend = ClaudeCliBackend(model=ns.model)
+    judge_fn = make_dedup_judge(
+        lambda prompt: backend.call(prompt).text,
+        max_retries=3,
+        log=_log,
+    )
+
+    _log(f"hunch bank sync: {eval_dir}")
+    _log(f"  bank → {bank_dir}")
+    _log(f"  model={ns.model}  window=±{ns.window_k}  workers={ns.max_workers}")
+    if ns.run:
+        _log(f"  run={ns.run}")
+    if ns.yes:
+        _log(f"  --yes: auto-migrating legacy labels")
+
+    result = sync(
+        bank_dir=bank_dir,
+        eval_dir=eval_dir,
+        judge_fn=judge_fn,
+        run_name=ns.run,
+        migrate_labels=ns.yes,
+        window_k=ns.window_k,
+        max_workers=ns.max_workers,
+        log=_log,
+    )
+
+    _log(f"\nDone: {result.total_entries} new entries, "
+         f"{result.total_links} links, "
+         f"{result.total_labels_migrated} labels migrated")
+    for r in result.runs:
+        _log(f"  {r.run_name}: {r.status} "
+             f"(entries={r.new_entries}, links={r.new_links}, "
+             f"labels={r.labels_migrated})")
+        if r.labels_pending:
+            _log(f"    labels.jsonl needs migration (use --yes)")
+        if r.conflict_detail:
+            _log(f"    CONFLICT: {r.conflict_detail}")
     return 0
 
 

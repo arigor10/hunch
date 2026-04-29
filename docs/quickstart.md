@@ -328,6 +328,30 @@ This runs the full pipeline — parsing, trigger, accumulator, prompt assembly �
 
 ---
 
+## Label bank
+
+After labeling hunches across multiple eval runs, use `hunch bank sync` to consolidate them into a single project-level bank. The bank dedup-matches hunches across runs so the same concern gets the same label everywhere, and accumulates ground truth for precision/recall measurement.
+
+```bash
+hunch bank sync --project-dir /path/to/project --yes
+```
+
+This discovers all eval runs under `.hunch/eval/`, ingests their hunches into `.hunch/bank/hunch_bank.jsonl`, and (with `--yes`) migrates any legacy `labels.jsonl` files into the bank. New hunches are matched against existing bank entries via an LLM judge — duplicates link to the existing entry and inherit its label automatically.
+
+**Key flags:**
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--project-dir PATH` | cwd | Project root containing `.hunch/` |
+| `--run NAME` | all | Sync only this eval run |
+| `--yes` | off | Auto-migrate legacy `labels.jsonl` into bank |
+| `--window-k N` | 5 | Dedup comparison window (±N hunches by bookmark) |
+| `--model MODEL` | `claude-haiku-4-5-20251001` | Model for dedup judge |
+
+The bank is append-only and event-sourced — see [`hunch_bank_design.md`](hunch_bank_design.md) for the full design. The annotation UI reads from the bank, so labels set there propagate to all linked hunches.
+
+---
+
 ## `hunch run` flags
 
 | Flag | Default | What it does |
