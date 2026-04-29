@@ -95,6 +95,8 @@ class BankWriter:
         *,
         category: str = "",
         labeled_by: str = "",
+        note: str = "",
+        tags: list[str] | None = None,
     ) -> None:
         """Append a label event (human judgment or retraction).
 
@@ -108,6 +110,8 @@ class BankWriter:
             "label": label,
             "category": category,
             "labeled_by": labeled_by,
+            "note": note,
+            "tags": tags or [],
             "ts": ts,
         })
 

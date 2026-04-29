@@ -10,6 +10,7 @@ import pytest
 
 from hunch.bank.reader import read_bank
 from hunch.bank.resolver import resolve_label
+from hunch.bank.schema import LIVE_RUN_NAME
 from hunch.bank.sync import sync, migrate_labels
 from hunch.bank.writer import BankWriter
 
@@ -54,6 +55,43 @@ def _write_labels(run_dir: Path, labels: list[dict]) -> None:
     with open(path, "w") as f:
         for l in labels:
             f.write(json.dumps(l) + "\n")
+
+
+def _write_feedback(replay_dir: Path, entries: list[dict]) -> None:
+    """Write a feedback.jsonl file with explicit channel entries."""
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    path = replay_dir / "feedback.jsonl"
+    with open(path, "w") as f:
+        for e in entries:
+            event = {
+                "ts": e.get("ts", "2026-04-28T00:00:00Z"),
+                "hunch_id": e["hunch_id"],
+                "channel": e.get("channel", "explicit"),
+                "label": e["label"],
+                "scientist_reply": e.get("scientist_reply"),
+            }
+            f.write(json.dumps(event) + "\n")
+
+
+def _write_replay_hunches(replay_dir: Path, hunches: list[dict]) -> None:
+    """Write hunches to .hunch/replay/hunches.jsonl."""
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    path = replay_dir / "hunches.jsonl"
+    with open(path, "w") as f:
+        f.write(json.dumps({"type": "meta", "note": "test"}) + "\n")
+        for h in hunches:
+            event = {
+                "type": "emit",
+                "hunch_id": h["hunch_id"],
+                "smell": h["smell"],
+                "description": h.get("description", ""),
+                "bookmark_prev": h.get("bookmark_prev", 0),
+                "bookmark_now": h.get("bookmark_now", 0),
+                "emitted_by_tick": h.get("emitted_by_tick", 1),
+                "ts": h.get("ts", "2026-04-28T00:00:00Z"),
+                "triggering_refs": h.get("triggering_refs", {"chunks": [], "artifacts": []}),
+            }
+            f.write(json.dumps(event) + "\n")
 
 
 def _never_dup_judge(smell_a, desc_a, smell_b, desc_b) -> dict:
@@ -117,6 +155,21 @@ class TestDiscovery:
         (eval_dir / "empty_run").mkdir()
         result = sync(bank_dir, eval_dir, _never_dup_judge)
         assert len(result.runs) == 0
+
+    def test_longest_run_ingested_first(self, tmp_path):
+        """Runs are ingested in descending order of hunch count so the
+        longest run seeds the bank with the richest canonicals."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+
+        # aaa_short has 1 hunch (alphabetically first)
+        _write_hunches(eval_dir / "aaa_short", SAMPLE_HUNCHES[:1])
+        # zzz_long has 3 hunches (alphabetically last)
+        _write_hunches(eval_dir / "zzz_long", SAMPLE_HUNCHES)
+
+        result = sync(bank_dir, eval_dir, _never_dup_judge)
+        # zzz_long should be first despite being alphabetically last
+        assert result.runs[0].run_name == "zzz_long"
+        assert result.runs[1].run_name == "aaa_short"
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +472,74 @@ class TestLabelsMigration:
         result = sync(bank_dir, eval_dir, _never_dup_judge, migrate_labels=True)
         assert result.runs[0].labels_migrated == 0
 
+    def test_duplicate_of_creates_manual_link(self, tmp_path):
+        """Labels with duplicate_of should create a manual link event
+        mapping the hunch to its duplicate's bank entry."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        run_dir = eval_dir / "run01"
+        _write_hunches(run_dir, [
+            {"hunch_id": "h-0001", "smell": "concern A",
+             "description": "original", "bookmark_now": 10},
+            {"hunch_id": "h-0002", "smell": "concern A variant",
+             "description": "duplicate", "bookmark_now": 15},
+            {"hunch_id": "h-0003", "smell": "concern B",
+             "description": "different", "bookmark_now": 30},
+        ])
+        _write_labels(run_dir, [
+            {"hunch_id": "h-0001", "label": "tp", "source": "evaluator",
+             "ts": "2026-04-28T00:00:00Z"},
+            {"hunch_id": "h-0002", "label": "tp", "source": "evaluator",
+             "ts": "2026-04-28T00:01:00Z", "duplicate_of": "h-0001"},
+            {"hunch_id": "h-0003", "label": "fp", "source": "evaluator",
+             "ts": "2026-04-28T00:02:00Z"},
+        ])
+
+        sync(bank_dir, eval_dir, _never_dup_judge, migrate_labels=True)
+
+        state = read_bank(bank_dir / "hunch_bank.jsonl")
+
+        # h-0002 should now be linked to h-0001's bank entry
+        bank_id_h1 = state.hunch_to_bank[("run01", "h-0001")]
+        bank_id_h2 = state.hunch_to_bank[("run01", "h-0002")]
+        assert bank_id_h1 == bank_id_h2
+
+        # h-0002's label should resolve under h-0001's bank entry
+        r2 = resolve_label(state, "run01", "h-0002")
+        assert r2.label == "tp"
+        assert r2.source == "human"
+
+        # h-0003 stays in its own bank entry
+        bank_id_h3 = state.hunch_to_bank[("run01", "h-0003")]
+        assert bank_id_h3 != bank_id_h1
+
+        # The link event should have source="manual" and replaces_bank_id
+        entry = state.entries[bank_id_h1]
+        manual_links = [l for l in entry.links if l.source == "manual"]
+        assert len(manual_links) == 1
+        assert manual_links[0].hunch_id == "h-0002"
+        assert manual_links[0].replaces_bank_id is not None
+
+    def test_note_and_tags_preserved(self, tmp_path):
+        """Note and tags from labels.jsonl should be preserved in the bank."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        run_dir = eval_dir / "run01"
+        _write_hunches(run_dir, SAMPLE_HUNCHES[:1])
+        _write_labels(run_dir, [
+            {"hunch_id": "h-0001", "label": "tp", "source": "evaluator",
+             "ts": "2026-04-28T00:00:00Z",
+             "note": "borderline but valuable",
+             "tags": ["borderline", "not_novel"]},
+        ])
+
+        sync(bank_dir, eval_dir, _never_dup_judge, migrate_labels=True)
+
+        state = read_bank(bank_dir / "hunch_bank.jsonl")
+        entry = list(state.entries.values())[0]
+        assert len(entry.labels) == 1
+        label = entry.labels[0]
+        assert label.note == "borderline but valuable"
+        assert label.tags == ["borderline", "not_novel"]
+
 
 # ---------------------------------------------------------------------------
 # Dormant entry revival via sync
@@ -536,3 +657,316 @@ class TestEndToEnd:
 
         # Total entries: 3 from run01 + 1 new from run02 = 4
         assert len(state.entries) == 4
+
+    def test_two_fresh_runs_single_sync_dedup(self, tmp_path):
+        """When two fresh runs are synced in one call against an empty
+        bank, the second run should still dedup against the first."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+
+        # Both runs present before sync — bank is empty
+        _write_hunches(eval_dir / "run01", [
+            {"hunch_id": "h-0001", "smell": "concern A",
+             "description": "first run", "bookmark_now": 10},
+            {"hunch_id": "h-0002", "smell": "concern B",
+             "description": "first run", "bookmark_now": 20},
+        ])
+        _write_hunches(eval_dir / "run02", [
+            {"hunch_id": "h-0001", "smell": "concern A",
+             "description": "second run", "bookmark_now": 12},
+            {"hunch_id": "h-0003", "smell": "concern C",
+             "description": "second run", "bookmark_now": 40},
+        ])
+
+        # Single sync call, empty bank
+        result = sync(bank_dir, eval_dir, _smell_match_judge)
+
+        # run01 ingested first (alphabetical), all new entries
+        r1 = [r for r in result.runs if r.run_name == "run01"][0]
+        assert r1.new_entries == 2
+        assert r1.new_links == 0
+
+        # run02: "concern A" should link to run01's entry
+        r2 = [r for r in result.runs if r.run_name == "run02"][0]
+        assert r2.new_links == 1  # concern A matched
+        assert r2.new_entries == 1  # concern C is new
+
+        state = read_bank(bank_dir / "hunch_bank.jsonl")
+        assert state.hunch_to_bank[("run02", "h-0001")] == "hb-0001"
+        assert len(state.entries) == 3  # A, B, C — not 4
+
+
+# ---------------------------------------------------------------------------
+# Live hunches sync tests
+# ---------------------------------------------------------------------------
+
+class TestLiveHunchDiscovery:
+    def test_discovers_live_hunches(self, tmp_path):
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:2])
+
+        result = sync(bank_dir, eval_dir, _never_dup_judge)
+        live_runs = [r for r in result.runs if r.run_name == LIVE_RUN_NAME]
+        assert len(live_runs) == 1
+        assert live_runs[0].new_entries == 2
+        assert live_runs[0].status == "ingested"
+
+    def test_no_replay_dir_no_live_run(self, tmp_path):
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        result = sync(bank_dir, eval_dir, _never_dup_judge)
+        live_runs = [r for r in result.runs if r.run_name == LIVE_RUN_NAME]
+        assert len(live_runs) == 0
+
+    def test_live_uses_colon_run_name(self, tmp_path):
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:1])
+
+        sync(bank_dir, eval_dir, _never_dup_judge)
+        state = read_bank(bank_dir / "hunch_bank.jsonl")
+        assert (LIVE_RUN_NAME, "h-0001") in state.hunch_to_bank
+
+
+class TestLiveHunchIncrementalIngest:
+    def test_incremental_growth(self, tmp_path):
+        """Live hunches grow over time; sync picks up only the new ones."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+
+        # First sync: 2 hunches
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:2])
+        result1 = sync(bank_dir, eval_dir, _never_dup_judge)
+        live1 = [r for r in result1.runs if r.run_name == LIVE_RUN_NAME][0]
+        assert live1.new_entries == 2
+
+        # Grow the file: add a third hunch
+        with open(replay_dir / "hunches.jsonl", "a") as f:
+            event = {
+                "type": "emit", "hunch_id": "h-0003",
+                "smell": "concern C", "description": "desc C",
+                "bookmark_prev": 0, "bookmark_now": 30,
+                "emitted_by_tick": 1, "ts": "2026-04-28T00:00:00Z",
+                "triggering_refs": {"chunks": [], "artifacts": []},
+            }
+            f.write(json.dumps(event) + "\n")
+
+        result2 = sync(bank_dir, eval_dir, _never_dup_judge)
+        live2 = [r for r in result2.runs if r.run_name == LIVE_RUN_NAME][0]
+        assert live2.new_entries == 1
+        assert live2.status == "resumed"
+
+    def test_no_growth_is_noop(self, tmp_path):
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:2])
+
+        sync(bank_dir, eval_dir, _never_dup_judge)
+        result2 = sync(bank_dir, eval_dir, _never_dup_judge)
+        live2 = [r for r in result2.runs if r.run_name == LIVE_RUN_NAME][0]
+        assert live2.status == "skipped_up_to_date"
+
+    def test_no_bank_copy_for_live(self, tmp_path):
+        """Live hunches are NOT copied to bank/runs/."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:1])
+
+        sync(bank_dir, eval_dir, _never_dup_judge)
+        assert not (bank_dir / "runs" / LIVE_RUN_NAME).exists()
+
+
+class TestLiveHunchDedup:
+    def test_live_dedupes_against_eval_run(self, tmp_path):
+        """A live hunch that matches an eval-run bank entry gets linked."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+
+        # Eval run first
+        _write_hunches(eval_dir / "run01", [
+            {"hunch_id": "h-0001", "smell": "concern A",
+             "description": "d", "bookmark_now": 10},
+        ])
+        sync(bank_dir, eval_dir, _never_dup_judge)
+
+        # Live hunch with same smell
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, [
+            {"hunch_id": "h-0001", "smell": "concern A",
+             "description": "live version", "bookmark_now": 12},
+        ])
+        result = sync(bank_dir, eval_dir, _smell_match_judge)
+        live = [r for r in result.runs if r.run_name == LIVE_RUN_NAME][0]
+        assert live.new_links == 1
+        assert live.new_entries == 0
+
+        state = read_bank(bank_dir / "hunch_bank.jsonl")
+        assert state.hunch_to_bank[(LIVE_RUN_NAME, "h-0001")] == "hb-0001"
+
+
+# ---------------------------------------------------------------------------
+# Feedback label import tests
+# ---------------------------------------------------------------------------
+
+class TestFeedbackLabelImport:
+    def test_imports_good_as_tp(self, tmp_path):
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:1])
+        _write_feedback(replay_dir, [
+            {"hunch_id": "h-0001", "label": "good"},
+        ])
+
+        result = sync(bank_dir, eval_dir, _never_dup_judge)
+        live = [r for r in result.runs if r.run_name == LIVE_RUN_NAME][0]
+        assert live.labels_migrated == 1
+
+        state = read_bank(bank_dir / "hunch_bank.jsonl")
+        r = resolve_label(state, LIVE_RUN_NAME, "h-0001")
+        assert r.label == "tp"
+        assert r.source == "human"
+
+    def test_imports_bad_as_fp(self, tmp_path):
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:1])
+        _write_feedback(replay_dir, [
+            {"hunch_id": "h-0001", "label": "bad"},
+        ])
+
+        sync(bank_dir, eval_dir, _never_dup_judge)
+        state = read_bank(bank_dir / "hunch_bank.jsonl")
+        r = resolve_label(state, LIVE_RUN_NAME, "h-0001")
+        assert r.label == "fp"
+
+    def test_skips_skip_labels(self, tmp_path):
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:1])
+        _write_feedback(replay_dir, [
+            {"hunch_id": "h-0001", "label": "skip"},
+        ])
+
+        result = sync(bank_dir, eval_dir, _never_dup_judge)
+        live = [r for r in result.runs if r.run_name == LIVE_RUN_NAME][0]
+        assert live.labels_migrated == 0
+
+    def test_skips_implicit_channel(self, tmp_path):
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:1])
+        _write_feedback(replay_dir, [
+            {"hunch_id": "h-0001", "label": "implicit",
+             "channel": "implicit", "scientist_reply": "interesting"},
+        ])
+
+        result = sync(bank_dir, eval_dir, _never_dup_judge)
+        live = [r for r in result.runs if r.run_name == LIVE_RUN_NAME][0]
+        assert live.labels_migrated == 0
+
+    def test_idempotent_feedback_sync(self, tmp_path):
+        """Re-syncing with same feedback writes no new labels."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:1])
+        _write_feedback(replay_dir, [
+            {"hunch_id": "h-0001", "label": "good"},
+        ])
+
+        sync(bank_dir, eval_dir, _never_dup_judge)
+        result2 = sync(bank_dir, eval_dir, _never_dup_judge)
+        live2 = [r for r in result2.runs if r.run_name == LIVE_RUN_NAME][0]
+        assert live2.labels_migrated == 0
+
+    def test_feedback_label_changed(self, tmp_path):
+        """If feedback changes, sync writes a new label event."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:1])
+        _write_feedback(replay_dir, [
+            {"hunch_id": "h-0001", "label": "good"},
+        ])
+
+        sync(bank_dir, eval_dir, _never_dup_judge)
+
+        # Scientist changes mind: good → bad
+        _write_feedback(replay_dir, [
+            {"hunch_id": "h-0001", "label": "good", "ts": "2026-04-28T00:00:00Z"},
+            {"hunch_id": "h-0001", "label": "bad", "ts": "2026-04-28T01:00:00Z"},
+        ])
+        result2 = sync(bank_dir, eval_dir, _never_dup_judge)
+        live2 = [r for r in result2.runs if r.run_name == LIVE_RUN_NAME][0]
+        assert live2.labels_migrated == 1
+
+        state = read_bank(bank_dir / "hunch_bank.jsonl")
+        r = resolve_label(state, LIVE_RUN_NAME, "h-0001")
+        assert r.label == "fp"
+
+    def test_feedback_skipped_for_unknown_hunches(self, tmp_path):
+        """Feedback for a hunch not yet in the bank is skipped."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:1])
+        _write_feedback(replay_dir, [
+            {"hunch_id": "h-0001", "label": "good"},
+            {"hunch_id": "h-9999", "label": "good"},  # not in replay
+        ])
+
+        result = sync(bank_dir, eval_dir, _never_dup_judge)
+        live = [r for r in result.runs if r.run_name == LIVE_RUN_NAME][0]
+        assert live.labels_migrated == 1
+
+    def test_feedback_does_not_delete_file(self, tmp_path):
+        """feedback.jsonl is never deleted or renamed."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+        _write_replay_hunches(replay_dir, SAMPLE_HUNCHES[:1])
+        _write_feedback(replay_dir, [
+            {"hunch_id": "h-0001", "label": "good"},
+        ])
+
+        sync(bank_dir, eval_dir, _never_dup_judge)
+        assert (replay_dir / "feedback.jsonl").exists()
+        assert not (replay_dir / "feedback.jsonl.bak").exists()
+
+
+class TestFeedbackLabelTierRanking:
+    def test_evaluator_label_outranks_feedback_in_inheritance(self, tmp_path):
+        """When both live feedback and evaluator labels exist,
+        inheritance should prefer the evaluator label."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        replay_dir = tmp_path / ".hunch" / "replay"
+
+        # Live hunch with "good" feedback
+        _write_replay_hunches(replay_dir, [
+            {"hunch_id": "h-0001", "smell": "concern A",
+             "description": "d", "bookmark_now": 10},
+        ])
+        _write_feedback(replay_dir, [
+            {"hunch_id": "h-0001", "label": "good"},
+        ])
+        sync(bank_dir, eval_dir, _never_dup_judge)
+
+        # Eval run with same concern (linked), evaluator labels fp
+        _write_hunches(eval_dir / "run02", [
+            {"hunch_id": "h-0001", "smell": "concern A",
+             "description": "eval version", "bookmark_now": 12},
+        ])
+        _write_labels(eval_dir / "run02", [
+            {"hunch_id": "h-0001", "label": "fp", "source": "scientist_retro",
+             "ts": "2026-04-28T12:00:00Z"},
+        ])
+        sync(bank_dir, eval_dir, _smell_match_judge, migrate_labels=True)
+
+        state = read_bank(bank_dir / "hunch_bank.jsonl")
+
+        # A third linked hunch should inherit the evaluator's fp, not the
+        # live feedback's tp
+        w = BankWriter(bank_dir / "hunch_bank.jsonl")
+        from hunch.bank.sync import _now_ts
+        w.write_link("hb-0001", "run03", "h-0009", _now_ts(),
+                      source="ingest", bookmark_now=11)
+
+        state = read_bank(bank_dir / "hunch_bank.jsonl")
+        r = resolve_label(state, "run03", "h-0009")
+        assert r.label == "fp"
+        assert r.source == "inherited"
+        assert r.inherited_from_run == "run02"

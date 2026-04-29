@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hunch.bank.reader import read_bank
-from hunch.bank.schema import BankState
+from hunch.bank.schema import LIVE_RUN_NAME, BankEntry, BankState
 from hunch.bank.writer import BankWriter
 
 
@@ -115,6 +115,22 @@ def sync(
         )
         result.runs.append(run_result)
 
+    # Live hunches from .hunch/replay/
+    if run_name is None or run_name == LIVE_RUN_NAME:
+        replay_hunches = bank_dir.parent / "replay" / "hunches.jsonl"
+        if replay_hunches.exists():
+            if log:
+                log(f"\nProcessing live hunches: {replay_hunches}")
+            live_result = _sync_live_run(
+                replay_hunches_path=replay_hunches,
+                bank_path=bank_path,
+                judge_fn=judge_fn,
+                window_k=window_k,
+                max_workers=max_workers,
+                log=log,
+            )
+            result.runs.append(live_result)
+
     return result
 
 
@@ -126,7 +142,11 @@ def _discover_runs(
     eval_dir: Path,
     run_name: str | None,
 ) -> list[tuple[str, Path]]:
-    """Find eval dirs matching <eval_dir>/<run_name>/hunches.jsonl."""
+    """Find eval dirs matching <eval_dir>/<run_name>/hunches.jsonl.
+
+    Returns runs sorted by hunch count descending so the longest run
+    seeds the bank first, producing richer canonical wordings.
+    """
     if not eval_dir.is_dir():
         return []
 
@@ -140,7 +160,26 @@ def _discover_runs(
         if run_name is not None and child.name != run_name:
             continue
         runs.append((child.name, hunches_path))
+
+    runs.sort(key=lambda r: _count_emitted(r[1]), reverse=True)
     return runs
+
+
+def _count_emitted(path: Path) -> int:
+    """Count non-filtered emit events in a hunches.jsonl file."""
+    count = 0
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if d.get("type") == "emit" and not d.get("filtered"):
+                count += 1
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +267,144 @@ def _sync_one_run(
                     f"— needs migration (use --yes or migrate_labels=True)")
 
     return run_result
+
+
+# ---------------------------------------------------------------------------
+# Live run sync
+# ---------------------------------------------------------------------------
+
+_FEEDBACK_LABEL_MAP = {"good": "tp", "bad": "fp"}
+
+
+def _sync_live_run(
+    replay_hunches_path: Path,
+    bank_path: Path,
+    judge_fn: JudgeFn,
+    window_k: int,
+    max_workers: int,
+    log: Callable[[str], None] | None,
+) -> RunSyncResult:
+    """Sync live hunches from .hunch/replay/ into the bank.
+
+    No bank copy, no conflict detection — the replay buffer is
+    append-only and is the canonical artifact.
+    """
+    eval_hunches = _load_emitted_hunches(replay_hunches_path)
+    if not eval_hunches:
+        if log:
+            log(f"  No emitted hunches found")
+        return RunSyncResult(run_name=LIVE_RUN_NAME, status="skipped_up_to_date")
+
+    state = read_bank(bank_path)
+    already_ingested = _already_ingested_ids(state, LIVE_RUN_NAME)
+    new_hunches = [h for h in eval_hunches if h["hunch_id"] not in already_ingested]
+
+    if not new_hunches:
+        run_result = RunSyncResult(
+            run_name=LIVE_RUN_NAME, status="skipped_up_to_date",
+        )
+    else:
+        if log:
+            log(f"  {len(new_hunches)} new hunches to process "
+                f"({len(already_ingested)} already ingested)")
+
+        status = "resumed" if already_ingested else "ingested"
+        run_result = _ingest_hunches(
+            rname=LIVE_RUN_NAME,
+            new_hunches=new_hunches,
+            state=state,
+            bank_path=bank_path,
+            judge_fn=judge_fn,
+            window_k=window_k,
+            max_workers=max_workers,
+            log=log,
+        )
+        run_result.status = status
+
+    # Feedback label import
+    feedback_path = replay_hunches_path.parent / "feedback.jsonl"
+    if feedback_path.exists():
+        imported = _sync_feedback_labels(
+            feedback_path=feedback_path,
+            bank_path=bank_path,
+            log=log,
+        )
+        run_result.labels_migrated = imported
+
+    return run_result
+
+
+def _sync_feedback_labels(
+    feedback_path: Path,
+    bank_path: Path,
+    log: Callable[[str], None] | None,
+) -> int:
+    """Import explicit feedback labels into the bank.
+
+    Reads feedback.jsonl, maps good→tp / bad→fp, and writes label
+    events for new or changed labels. Idempotent: re-running writes
+    nothing if feedback hasn't changed.
+    """
+    from hunch.journal.feedback import read_labeled_hunch_ids
+
+    feedback_labels = read_labeled_hunch_ids(feedback_path)
+    if not feedback_labels:
+        return 0
+
+    state = read_bank(bank_path)
+    writer = BankWriter(bank_path)
+    imported = 0
+
+    for hid, fb_label in feedback_labels.items():
+        bank_label = _FEEDBACK_LABEL_MAP.get(fb_label)
+        if bank_label is None:
+            continue
+
+        bank_id = state.hunch_to_bank.get((LIVE_RUN_NAME, hid))
+        if bank_id is None:
+            if log:
+                log(f"    SKIP feedback for {hid}: not in bank yet")
+            continue
+
+        entry = state.entries.get(bank_id)
+        if entry is None:
+            continue
+
+        existing = _current_feedback_label(entry, hid)
+        if existing == bank_label:
+            continue
+
+        writer.write_label(
+            bank_id=bank_id,
+            run=LIVE_RUN_NAME,
+            hunch_id=hid,
+            label=bank_label,
+            ts=_now_ts(),
+            labeled_by="operational_live",
+        )
+        imported += 1
+        if log:
+            action = "updated" if existing is not None else "imported"
+            log(f"    {action} feedback label for {hid}: {fb_label} → {bank_label}")
+
+    if log and imported:
+        log(f"  Imported {imported} feedback labels")
+
+    return imported
+
+
+def _current_feedback_label(entry: BankEntry, hunch_id: str) -> str | None:
+    """Find the current operational_live label for a live hunch, if any."""
+    best_ts = ""
+    best_label = None
+    for lr in entry.labels:
+        if (lr.run == LIVE_RUN_NAME
+                and lr.hunch_id == hunch_id
+                and lr.labeled_by == "operational_live"
+                and lr.ts > best_ts):
+            best_ts = lr.ts
+            best_label = lr.label
+    return best_label
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +672,24 @@ def _migrate_labels(
                 log(f"    SKIP label for {hid}: unsupported label '{label_val}'")
             continue
 
+        # Manual within-run dedup: link this hunch to the target's bank entry
+        dup_of = label_data.get("duplicate_of")
+        if dup_of:
+            target_bank_id = state.hunch_to_bank.get((rname, dup_of))
+            if target_bank_id and target_bank_id != bank_id:
+                writer.write_link(
+                    bank_id=target_bank_id,
+                    run=rname,
+                    hunch_id=hid,
+                    ts=_now_ts(),
+                    source="manual",
+                    replaces_bank_id=bank_id,
+                )
+                bank_id = target_bank_id
+                if log:
+                    log(f"    LINK {hid} → {target_bank_id} "
+                        f"(duplicate_of {dup_of})")
+
         writer.write_label(
             bank_id=bank_id,
             run=rname,
@@ -503,6 +698,8 @@ def _migrate_labels(
             ts=_now_ts(),
             category=label_data.get("category", ""),
             labeled_by=label_data.get("source", "legacy_migration"),
+            note=label_data.get("note", ""),
+            tags=label_data.get("tags", []),
         )
         migrated += 1
 

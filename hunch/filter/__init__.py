@@ -7,6 +7,6 @@ Both checks use a fast LLM judge call.
 See docs/framework_v0.md §4 for the design rationale.
 """
 
-from hunch.filter.core import FilterResult, HunchFilter
+from hunch.filter.core import FilterResult, HunchFilter, make_dedup_judge
 
-__all__ = ["FilterResult", "HunchFilter"]
+__all__ = ["FilterResult", "HunchFilter", "make_dedup_judge"]

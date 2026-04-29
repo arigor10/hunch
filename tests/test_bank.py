@@ -53,7 +53,7 @@ class TestS2:
         w = _writer(tmp_path)
         w.write_entry("hb-0001", "smell", "desc", "run01", "h-0001", _ts(1))
         w.write_label("hb-0001", "run01", "h-0001", "tp", _ts(2),
-                       category="confound", labeled_by="ariel")
+                       category="confound", labeled_by="scientist_retro")
         state = read_bank(_bank_path(tmp_path))
         r = resolve_label(state, "run01", "h-0001")
         assert r.label == "tp"
@@ -320,6 +320,99 @@ class TestS13:
         assert r3.label == "tp"
         assert r3.source == "inherited"
         assert r3.inherited_from_run == "run01"
+
+
+# ---------------------------------------------------------------------------
+# S14: Live feedback label overridden by evaluator
+# ---------------------------------------------------------------------------
+
+class TestS14:
+    def test_evaluator_outranks_live_feedback(self, tmp_path):
+        """Tier 1 (scientist_retro) outranks tier 2 (operational_live)
+        regardless of timestamp order."""
+        w = _writer(tmp_path)
+        w.write_entry("hb-0001", "smell", "desc", ":live", "h-0001", _ts(1))
+        # Scientist presses "good" in TUI → operational_live tp
+        w.write_label("hb-0001", ":live", "h-0001", "tp", _ts(2),
+                       labeled_by="operational_live")
+        # Evaluator labels fp later
+        w.write_label("hb-0001", ":live", "h-0001", "fp", _ts(3),
+                       labeled_by="scientist_retro")
+
+        state = read_bank(_bank_path(tmp_path))
+        r = resolve_label(state, ":live", "h-0001")
+        assert r.label == "fp"
+        assert r.source == "human"
+
+    def test_evaluator_outranks_live_feedback_reverse_order(self, tmp_path):
+        """Tier 1 wins even when it has an earlier timestamp than tier 2."""
+        w = _writer(tmp_path)
+        w.write_entry("hb-0001", "smell", "desc", ":live", "h-0001", _ts(1))
+        # Evaluator labels fp first
+        w.write_label("hb-0001", ":live", "h-0001", "fp", _ts(2),
+                       labeled_by="scientist_retro")
+        # Scientist later presses "good" in TUI
+        w.write_label("hb-0001", ":live", "h-0001", "tp", _ts(3),
+                       labeled_by="operational_live")
+
+        state = read_bank(_bank_path(tmp_path))
+        r = resolve_label(state, ":live", "h-0001")
+        assert r.label == "fp"
+        assert r.source == "human"
+
+
+# ---------------------------------------------------------------------------
+# S15: Inherited tier ranking
+# ---------------------------------------------------------------------------
+
+class TestS15:
+    def test_inherited_prefers_evaluator_over_feedback(self, tmp_path):
+        """For inheritance, tier 1 labels are preferred even if a tier 2
+        label was first by timestamp."""
+        w = _writer(tmp_path)
+        w.write_entry("hb-0001", "smell", "desc", ":live", "h-0001", _ts(1))
+        w.write_link("hb-0001", "run02", "h-0005", _ts(2))
+        w.write_link("hb-0001", "run03", "h-0009", _ts(3))
+        # Live feedback first (tier 2, earlier ts)
+        w.write_label("hb-0001", ":live", "h-0001", "tp", _ts(4),
+                       labeled_by="operational_live")
+        # Evaluator labels run02 later (tier 1, later ts)
+        w.write_label("hb-0001", "run02", "h-0005", "fp", _ts(5),
+                       labeled_by="scientist_retro")
+
+        state = read_bank(_bank_path(tmp_path))
+
+        # :live/h-0001 has a local label (operational_live tp)
+        r1 = resolve_label(state, ":live", "h-0001")
+        assert r1.label == "tp"
+        assert r1.source == "human"
+
+        # run02/h-0005 has a local label (scientist_retro fp)
+        r2 = resolve_label(state, "run02", "h-0005")
+        assert r2.label == "fp"
+        assert r2.source == "human"
+
+        # run03/h-0009: no local label, inherits tier 1 (run02's fp)
+        # even though :live's tp was earlier
+        r3 = resolve_label(state, "run03", "h-0009")
+        assert r3.label == "fp"
+        assert r3.source == "inherited"
+        assert r3.inherited_from_run == "run02"
+
+    def test_inherited_falls_back_to_feedback_when_no_evaluator(self, tmp_path):
+        """If only tier 2 labels exist, they are used for inheritance."""
+        w = _writer(tmp_path)
+        w.write_entry("hb-0001", "smell", "desc", ":live", "h-0001", _ts(1))
+        w.write_link("hb-0001", "run02", "h-0005", _ts(2))
+        # Only live feedback, no evaluator labels
+        w.write_label("hb-0001", ":live", "h-0001", "tp", _ts(3),
+                       labeled_by="operational_live")
+
+        state = read_bank(_bank_path(tmp_path))
+        r = resolve_label(state, "run02", "h-0005")
+        assert r.label == "tp"
+        assert r.source == "inherited"
+        assert r.inherited_from_run == ":live"
 
 
 # ---------------------------------------------------------------------------

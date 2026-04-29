@@ -83,6 +83,18 @@ Eval run directories live under `<project>/.hunch/eval/`:
     hunches.jsonl
 ```
 
+Live hunches from `hunch run` sessions live under `<project>/.hunch/replay/`:
+
+```
+<project>/.hunch/replay/
+  hunches.jsonl                 # live critic output (grows each session)
+  feedback.jsonl                # TUI labels (good/bad/skip)
+  conversation.jsonl
+  artifacts.jsonl
+```
+
+Live hunches are synced into the bank under the synthetic run name `:live` (colon is forbidden in directory names, preventing collision with eval run names). Unlike eval runs, the replay buffer is not copied — the original is the canonical artifact. See [Live hunches and feedback labels](#live-hunches-and-feedback-labels).
+
 The bank is discovered automatically by the CLI (walk up to find `.hunch/`). No `--bank` flag.
 
 ## Bank event schema
@@ -146,14 +158,19 @@ Written by the annotation tool when a human labels a hunch.
   "hunch_id": "h-0003",
   "label": "tp",
   "category": "confound",
-  "labeled_by": "ariel",
+  "labeled_by": "scientist_retro",
   "ts": "2026-04-28T10:00:00Z"
 }
 ```
 
 - `label`: `tp` | `fp` | `null`. `tp`/`fp` are substantive judgments. `null` is a retraction ("I withdraw my previous label"). No `skip` — skip is a UI-only workflow state, not persisted in the bank.
 - `category`: optional free-text (e.g., `confound`, `measurement`, `contradiction`).
-- `labeled_by`: evaluator identifier.
+- `labeled_by`: label provenance channel. Known values:
+  - `scientist_retro` — deliberate annotation in the annotation UI (highest confidence).
+  - `operational_live` — live feedback from the side-panel TUI during `hunch run` (ecological validity, lower deliberative confidence). See [Live hunches and feedback labels](#live-hunches-and-feedback-labels).
+  - `anchor` — hand-curated known-good catches.
+  - `mined` — automated transcript mining.
+  - `legacy_migration` — migrated from a pre-bank `labels.jsonl` without a source field.
 - `run` + `hunch_id`: which specific linked hunch was labeled. See [Label resolver algorithm](#label-resolver-algorithm) for how labels are resolved.
 
 ### `tombstone` — run dropped
@@ -199,9 +216,22 @@ The resolver takes the folded bank state and a `(run, hunch_id)` pair.
 
 5. **If no inherited label** → return `{label: null, source: "unlabeled"}`.
 
+### Label tiers
+
+Labels are partitioned into tiers by `labeled_by`:
+
+- **Tier 1 (deliberate):** `scientist_retro`, `anchor`, `mined`, `legacy_migration`, or any value not in the weak set.
+- **Tier 2 (weak):** `operational_live` — live feedback from the TUI.
+
+Tier ranking affects both local and inherited label resolution:
+
+- **Local:** If a `(bank_id, run, hunch_id)` triple has both tier 1 and tier 2 labels, only tier 1 labels are considered. Within the same tier, last-write-wins by ts. This means an evaluator's deliberate label outranks a scientist's quick TUI feedback, regardless of timestamp order.
+- **Inherited:** Among all linked hunches with a non-null effective label, partition by tier of the effective label's `labeled_by`. Pick from tier 1 first (earliest-first-label-ts). Only fall back to tier 2 if no tier 1 labels exist.
+
 ### Key properties
 
-- **Last-write-wins** within a `(bank_id, run, hunch_id)` triple, by ts.
+- **Last-write-wins** within a `(bank_id, run, hunch_id)` triple, by ts (within the same tier).
+- **Tier 1 outranks tier 2.** A deliberate evaluator label always beats live feedback, regardless of timestamp.
 - **Human beats inherited.** A local label always overrides an inherited one.
 - **Retraction is local.** Retracting a label on one linked hunch does not affect labels on other linked hunches. If the retracted label was the canonical one, the next-earliest non-retracted label becomes canonical. If all labels are retracted, the bank entry reverts to unlabeled.
 - **Relinking orphans old labels.** When a hunch is manually relinked from hb-X to hb-Y, any label events keyed to `(hb-X, run, hunch_id)` are orphaned — they apply to a mapping that no longer exists. The hunch's effective label is now resolved under hb-Y.
@@ -318,6 +348,24 @@ Each scenario describes an action sequence and the expected label resolver outpu
 - **Resolve (run02, h-0005):** `fp, source: human`
 - **Resolve (run03, h-0009):** `tp, source: inherited, from run01/h-0001` — inherits canonical (earliest-labeled)
 
+### S14: Live feedback label overridden by evaluator
+
+- Ingest `:live`: h-0001 → hb-0001
+- Scientist presses "good" in TUI → label event: (hb-0001, :live, h-0001) = tp, labeled_by = operational_live
+- Evaluator labels (hb-0001, :live, h-0001) as fp, labeled_by = scientist_retro
+- **Resolve (:live, h-0001):** `fp, source: human` — tier 1 (scientist_retro) outranks tier 2 (operational_live), regardless of timestamp order
+
+### S15: Inherited tier ranking — evaluator label preferred over live feedback
+
+- Ingest `:live`: h-0001 → hb-0001
+- Ingest run02: h-0005 links to hb-0001
+- Scientist presses "good" on :live/h-0001 → label: tp, labeled_by = operational_live (first label by ts)
+- Evaluator labels (hb-0001, run02, h-0005) as fp, labeled_by = scientist_retro (later label by ts)
+- **Resolve (:live, h-0001):** `tp, source: human` — local label (operational_live tier 2) is still a local label, so it takes priority over inheritance
+- **Resolve (run02, h-0005):** `fp, source: human` — local evaluator label
+- Now, add a third link: ingest run03: h-0009 links to hb-0001 (no local label)
+- **Resolve (run03, h-0009):** `fp, source: inherited, from run02/h-0005` — tier 1 label (scientist_retro) is preferred for inheritance, even though the operational_live label was earlier by ts
+
 ## Append monotonicity
 
 Every event appended to `hunch_bank.jsonl` must have a `ts` strictly greater than the last event's `ts` in the file. The writer checks this before appending and raises `RuntimeError` if violated. This guards against clock skew or concurrent writers producing an ambiguous event order.
@@ -398,7 +446,42 @@ Pass `--yes` to auto-confirm all migrations (non-interactive).
 - Interrupted sync: next run detects partially-ingested hunches (some IDs present, others not) and processes only the missing ones. The `hunches.jsonl` copy is written at the start, so it's always complete.
 - A `labels.jsonl.bak` file signals that migration already completed for that run.
 
+## Live hunches and feedback labels
+
+Live hunches from `hunch run` sessions (stored in `.hunch/replay/hunches.jsonl`) are synced into the bank alongside eval runs. The synthetic run name `:live` prevents collision with eval run names (colon is forbidden in directory names).
+
+### Discovery
+
+Sync auto-discovers live hunches at `<bank_dir>/../replay/hunches.jsonl` (derived from the bank's location — no extra config). If the file exists, it's included in the sync.
+
+### Incremental ingest
+
+Unlike eval runs, live hunches are **not copied** into `bank/runs/`. The replay buffer is the original, append-only artifact — copying it would be pure redundancy with no conflict-detection benefit (eval copies exist because eval outputs might be re-extracted or deleted).
+
+Each sync finds which `:live` hunch IDs are already in the bank (via `_already_ingested_ids`) and only dedup-matches + ingests the new ones. The existing resume mechanism handles interrupted syncs natively — no new code path needed.
+
+### Feedback label import
+
+After ingesting live hunches, sync reads `.hunch/replay/feedback.jsonl` and reconciles explicit labels with the bank:
+
+1. Read all explicit labels from `feedback.jsonl` (last-write-wins per hunch_id, same as `read_labeled_hunch_ids()`).
+2. Map vocabulary: `good` → `tp`, `bad` → `fp`. `skip` is ignored (UI-only, per bank convention). `implicit` channel events are ignored.
+3. For each mapped label, check if the bank already has an `operational_live` label for `(:live, hunch_id)`:
+   - **No existing label:** write a new `label` event with `labeled_by: "operational_live"`.
+   - **Existing label differs:** write a new `label` event (scientist changed their mind).
+   - **Existing label matches:** skip (idempotent).
+
+`feedback.jsonl` is **never deleted or renamed** — it's a living file that keeps growing. The bank labels with `labeled_by: "operational_live"` are a reconciled projection of `feedback.jsonl`, updated each sync.
+
+### Weakness semantics
+
+Live feedback labels use `labeled_by: "operational_live"`, which is tier 2 (weak) in the label resolver. This means:
+
+- An evaluator's `scientist_retro` label always outranks `operational_live`, regardless of timestamp.
+- For inheritance, tier 1 labels are preferred. A live feedback label only propagates as an inherited label if no tier 1 labels exist for that bank entry.
+
+This reflects the reality that pressing "good" in the TUI is a quick in-the-moment reaction, while retrospective annotation is a deliberate judgment.
+
 ## Open questions (deferred)
 
 - **Annotation tool integration.** How does `annotate_web.py` read/write the bank? What changes to the UI for inherited labels?
-- **Feedback.jsonl coexistence.** Live feedback (`good`/`bad`/`skip` from the side panel during `hunch run`) still goes to `feedback.jsonl`. How does it relate to the bank? Ingested as labels at sync time?

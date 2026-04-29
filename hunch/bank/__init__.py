@@ -1,6 +1,7 @@
 """Hunch bank: project-level identity + label store for concerns across runs."""
 
 from hunch.bank.schema import (
+    LIVE_RUN_NAME,
     BankEntry,
     BankState,
     LinkRecord,
@@ -13,6 +14,7 @@ from hunch.bank.resolver import resolve_label
 from hunch.bank.sync import sync, migrate_labels, SyncResult, RunSyncResult
 
 __all__ = [
+    "LIVE_RUN_NAME",
     "BankEntry",
     "BankState",
     "BankWriter",

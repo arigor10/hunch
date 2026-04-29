@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+LIVE_RUN_NAME = ":live"
+
 
 @dataclass
 class LinkRecord:
@@ -30,6 +32,8 @@ class LabelRecord:
     label: str | None  # "tp", "fp", or None (retraction)
     category: str = ""
     labeled_by: str = ""
+    note: str = ""
+    tags: list[str] = field(default_factory=list)
     ts: str = ""
 
 

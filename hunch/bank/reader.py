@@ -103,6 +103,8 @@ def _fold_label(state: BankState, event: dict) -> None:
         label=event.get("label"),
         category=event.get("category", ""),
         labeled_by=event.get("labeled_by", ""),
+        note=event.get("note", ""),
+        tags=event.get("tags", []),
         ts=event.get("ts", ""),
     )
     entry.labels.append(label)

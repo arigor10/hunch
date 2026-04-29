@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from hunch.bank.schema import BankEntry, BankState, LabelRecord, ResolvedLabel
 
+_WEAK_LABELED_BY = frozenset({"operational_live"})
+
 
 def resolve_label(state: BankState, run: str, hunch_id: str) -> ResolvedLabel:
     """Resolve the effective label for a specific hunch.
@@ -56,9 +58,10 @@ def _effective_local_label(
 ) -> LabelRecord | None:
     """Find the effective label for a specific (bank_id, run, hunch_id).
 
-    Last label event by ts wins. Returns None if no label events exist
-    for this triple. Returns a LabelRecord with label=None if the last
-    event was a retraction.
+    Tier 1 (deliberate) labels outrank tier 2 (weak/operational_live).
+    Within the same tier, last label event by ts wins. Returns None if
+    no label events exist for this triple. Returns a LabelRecord with
+    label=None if the last event was a retraction.
     """
     candidates = [
         lr for lr in entry.labels
@@ -66,6 +69,9 @@ def _effective_local_label(
     ]
     if not candidates:
         return None
+    tier1 = [c for c in candidates if c.labeled_by not in _WEAK_LABELED_BY]
+    if tier1:
+        return max(tier1, key=lambda lr: lr.ts)
     return max(candidates, key=lambda lr: lr.ts)
 
 
@@ -78,15 +84,17 @@ def _find_inherited_label(
     """Find the canonical inherited label for a bank entry.
 
     Looks at all linked hunches (including the source hunch) that
-    are NOT the one being resolved and NOT tombstoned. For each,
-    computes the effective label. Among those with a non-null
-    effective label, returns the one whose first label event has
-    the earliest ts (the canonical labeler).
+    are NOT the one being resolved. For each, computes the effective
+    label. Tier 1 (deliberate) labels are preferred over tier 2
+    (weak/operational_live). Within the same tier, the one whose
+    first label event has the earliest ts wins (the canonical labeler).
     """
     all_linked = _all_linked_hunches(entry)
 
-    best: LabelRecord | None = None
-    best_first_ts: str = ""
+    tier1_best: LabelRecord | None = None
+    tier1_best_ts: str = ""
+    tier2_best: LabelRecord | None = None
+    tier2_best_ts: str = ""
 
     for linked_run, linked_hid in all_linked:
         if linked_run == exclude_run and linked_hid == exclude_hunch_id:
@@ -100,11 +108,18 @@ def _find_inherited_label(
             continue
 
         first_ts = _first_label_ts(entry, linked_run, linked_hid)
-        if best is None or first_ts < best_first_ts:
-            best = effective
-            best_first_ts = first_ts
+        is_weak = effective.labeled_by in _WEAK_LABELED_BY
 
-    return best
+        if not is_weak:
+            if tier1_best is None or first_ts < tier1_best_ts:
+                tier1_best = effective
+                tier1_best_ts = first_ts
+        else:
+            if tier2_best is None or first_ts < tier2_best_ts:
+                tier2_best = effective
+                tier2_best_ts = first_ts
+
+    return tier1_best if tier1_best is not None else tier2_best
 
 
 def _all_linked_hunches(entry: "BankState.entries") -> list[tuple[str, str]]:
