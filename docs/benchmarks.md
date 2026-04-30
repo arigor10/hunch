@@ -1,6 +1,6 @@
 # Benchmarks
 
-**Status:** living document, last updated 2026-04-29
+**Status:** living document, last updated 2026-04-30
 
 Early benchmark results for Hunch components. These are not paper-ready — the datasets are small and drawn from a single project — but they establish baselines and guide iteration. Results will be updated as more labeled data accumulates.
 
@@ -43,3 +43,68 @@ Production uses `judge_dedup.md` (baseline prompt) with Haiku 4.5.
 - **n=31** is small. Confidence intervals are wide (e.g., Haiku's precision 95% CI is roughly 73%–99% by Wilson interval). These numbers guide iteration, not publication.
 - All pairs are from one project (`soft_prompting`). Cross-project generalization is untested.
 - The dedup judge in the bank sync pipeline operates within a bookmark window (±k ticks), so the eval slightly overstates difficulty — some non-duplicate pairs would never be compared in production.
+
+## Meeting-room vs raw transcript
+
+**Question:** Does the meeting-room abstraction (compacted dialogue summaries) help the critic catch things that a raw-transcript critic misses?
+
+**Setup:** The `soft_prompting` project's Claude Code session (18K events, 39 compaction boundaries, 40 context windows) was processed two ways:
+
+1. **Meeting-room critic:** DeepSeek V4 Pro via the standard Hunch pipeline — sees a compacted meeting-room summary that accumulates across the full session. 240 ticks, 103 hunches emitted (after dedup+novelty filtering).
+2. **Raw-transcript critic:** DeepSeek V4 Pro given the full-resolution raw transcript, one chunk per compaction window. Each chunk is independent — no accumulated context. 40 chunks, 60 hunches emitted.
+
+The raw hunches were deduped (sliding window of 10), novelty-filtered against their source chunks, then cross-matched against all 103 meeting-room hunches using the dedup judge.
+
+### Raw-transcript pipeline
+
+| Stage | Count |
+|---|---|
+| Raw hunches emitted | 60 |
+| After intra-run dedup | 52 (-8 dups) |
+| After novelty filter | 39 (-13 already raised) |
+
+### Cross-match results
+
+| Metric | Value |
+|---|---|
+| Raw-only (not in meeting-room) | 21 |
+| Meeting-room-only (not in raw) | 88 |
+| Cross-matches (overlap) | 18 |
+| Raw recall of meeting-room | 18/103 = 17.5% |
+
+The raw transcript critic recovers only 17.5% of the meeting-room critic's catches. The meeting-room catches 5x more unique concerns. Raw-only hunches tend to be local/operational (CUDA warnings, memory discrepancies, miscounts within a single chunk), while meeting-room-only hunches are long-range scientific tensions across experiments.
+
+### Cross-compaction citation analysis
+
+To quantify how far back the meeting-room critic reaches, we mapped each of the 103 meeting-room hunches' cited evidence (`triggering_refs.chunks`) back to the original Claude Code session's 40 compaction windows. A hunch "spans N compaction boundaries" if its earliest cited chunk is from a compaction window N windows before the trigger window.
+
+| Hunches citing across... | Count | % of 103 |
+|---|---|---|
+| >= 1 compaction boundary | 51 | 50% |
+| >= 2 compaction boundaries | 23 | 22% |
+| >= 5 compaction boundaries | 2 | 2% |
+
+**50% of the meeting-room critic's hunches connect evidence across at least one Claude Code compaction boundary** — information that was compacted away from the original session and is only accessible through the accumulated meeting-room summary.
+
+Additionally, 72/103 (70%) of hunches cite evidence from before their trigger window (even if within the same compaction window), meaning the accumulated timeline — not just the fresh chunks — is the primary evidence source.
+
+### Gap distribution (replay-buffer chunks before trigger window)
+
+```
+gap= 0:  52 hunches (local only)
+gap= 1:  28
+gap= 2:  14
+gap= 3:   2
+gap= 4:   5
+gap= 6:   1
+gap= 7:   1
+```
+
+The largest gap is 7 compaction boundaries: h-0167 ("exp_005b 'H4: Decisively refuted' contradicts exp_009 warm-start finding") connects evidence from compaction window 27 to window 34.
+
+### Caveats
+
+- Single project (`soft_prompting`), single model (DeepSeek V4 Pro). The meeting-room advantage may vary by project length and model.
+- Cross-match uses the dedup judge prompt, which was designed for same-run duplicates, not cross-run semantic matching. Some true overlaps may be missed.
+- The raw-transcript critic sees each chunk independently (no memory across chunks). A raw critic with sliding-window context would likely perform better, but would still lack the full-session accumulated view.
+- Compaction boundary mapping uses timestamps to correlate replay events to the original session. All 3,459 replay events matched (100%).
