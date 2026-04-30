@@ -293,12 +293,16 @@ hunch list --replay-dir /path/to/project/.hunch/eval/run01
 **[Web annotation UI](eval_infrastructure.md#the-annotation-ui)** (full conversation + hunches side-by-side):
 
 ```bash
+# Recommended: project mode (discovers all runs + bank)
+hunch annotate-web --project-dir /path/to/project
+
+# Single-run mode (legacy, no bank integration)
 hunch annotate-web \
   --replay-dir /path/to/project/.hunch/replay \
   --run-dir /path/to/project/.hunch/eval/run01
 ```
 
-Opens at `http://localhost:5555`. Click on a hunch to jump to the conversation context where it was raised.
+Opens at `http://localhost:5555`. Click on a hunch to jump to the conversation context where it was raised. In project mode, you can switch between eval runs in the sidebar, and labels are read from / written to the bank.
 
 ---
 ## Appendix
@@ -330,15 +334,26 @@ This runs the full pipeline — parsing, trigger, accumulator, prompt assembly �
 
 ## Label bank
 
-After labeling hunches across multiple eval runs, use `hunch bank sync` to consolidate them into a single project-level bank. The bank dedup-matches hunches across runs so the same concern gets the same label everywhere, and accumulates ground truth for precision/recall measurement.
+After running the Critic (live or offline), use the bank to consolidate hunches across runs into a single project-level store. The bank dedup-matches hunches via an LLM judge, so the same concern gets the same label everywhere.
+
+### Typical workflow
 
 ```bash
+# 1. Run the Critic (produces hunches in .hunch/eval/<run>/)
+hunch replay-offline --replay-dir ... --output-dir .hunch/eval/run01 --config ...
+
+# 2. Sync hunches into the bank (dedup-matches against existing entries)
 hunch bank sync --project-dir /path/to/project --yes
+
+# 3. Annotate (project mode — sees all runs + bank labels)
+hunch annotate-web --project-dir /path/to/project
 ```
 
-This discovers all eval runs under `.hunch/eval/`, ingests their hunches into `.hunch/bank/hunch_bank.jsonl`, and (with `--yes`) migrates any legacy `labels.jsonl` files into the bank. New hunches are matched against existing bank entries via an LLM judge — duplicates link to the existing entry and inherit its label automatically.
+Step 2 discovers all eval runs under `.hunch/eval/`, ingests their hunches into `.hunch/bank/hunch_bank.jsonl`, and (with `--yes`) migrates any legacy `labels.jsonl` files. New hunches are matched against existing bank entries — duplicates link to the existing entry and inherit its label automatically.
 
-**Key flags:**
+Step 3 opens the annotation UI in bank mode. You can switch between runs in the sidebar. Labels you set are written to the bank and propagate to all linked hunches across runs. The conversation is shown alongside each hunch so you can judge in context.
+
+### Key flags (bank sync)
 
 | Flag | Default | What it does |
 |------|---------|--------------|
@@ -348,7 +363,7 @@ This discovers all eval runs under `.hunch/eval/`, ingests their hunches into `.
 | `--window-k N` | 5 | Dedup comparison window (±N hunches by bookmark) |
 | `--model MODEL` | `claude-haiku-4-5-20251001` | Model for dedup judge |
 
-The bank is append-only and event-sourced — see [`hunch_bank_design.md`](hunch_bank_design.md) for the full design. The annotation UI reads from the bank, so labels set there propagate to all linked hunches.
+The bank is append-only and event-sourced — see [`hunch_bank_design.md`](hunch_bank_design.md) for the full design.
 
 ---
 
