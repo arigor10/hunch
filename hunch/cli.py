@@ -209,27 +209,34 @@ def _build_parser() -> argparse.ArgumentParser:
         "annotate-web",
         help="browser-based annotation UI (local Flask server)",
     )
+    aweb_group = aweb.add_mutually_exclusive_group(required=True)
+    aweb_group.add_argument(
+        "--project-dir",
+        type=Path,
+        default=None,
+        help="project root (discovers replay, eval runs, and bank)",
+    )
+    aweb_group.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help="single eval run directory (legacy mode)",
+    )
     aweb.add_argument(
         "--replay-dir",
         type=Path,
-        required=True,
-        help="replay-buffer directory (conversation.jsonl)",
-    )
-    aweb.add_argument(
-        "--run-dir",
-        type=Path,
-        required=True,
-        help="critic run directory (hunches.jsonl, labels.jsonl)",
+        default=None,
+        help="replay-buffer directory (auto-detected from --project-dir)",
     )
     aweb.add_argument(
         "--novel-only",
         action="store_true",
-        help="only show novel hunches (requires novelty_summary.json in run-dir)",
+        help="only show novel hunches (legacy mode only)",
     )
     aweb.add_argument(
         "--dedup",
         action="store_true",
-        help="exclude duplicate hunches (requires dedup/dedup_summary.json in run-dir)",
+        help="exclude duplicate hunches (legacy mode only)",
     )
     aweb.add_argument(
         "--port",
@@ -738,9 +745,17 @@ def _cmd_panel(ns: argparse.Namespace) -> int:
 def _cmd_annotate_web(ns: argparse.Namespace) -> int:
     from hunch.annotate_web import run_server
 
+    replay_dir = ns.replay_dir
+    if replay_dir is None and ns.run_dir is not None:
+        from hunch.annotate_web import _infer_project_dir
+        project = _infer_project_dir(ns.run_dir)
+        if project:
+            replay_dir = project / ".hunch" / "replay"
+
     return run_server(
-        replay_dir=ns.replay_dir,
+        replay_dir=replay_dir,
         run_dir=ns.run_dir,
+        project_dir=ns.project_dir,
         novel_only=ns.novel_only,
         dedup=ns.dedup,
         port=ns.port,
