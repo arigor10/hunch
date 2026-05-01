@@ -20,19 +20,21 @@ The annotation tool is the bottleneck. If labeling is painful, nobody does it. I
 ## Data flow
 
 ```
-.hunch/replay/ ──→ critic ──→ hunches.jsonl
+.hunch/replay/ ──→ critic ──→ .hunch/eval/<run>/hunches.jsonl
                               │
                               ▼
-                    novelty filter            ←── drop hunches the
-                    (judge_novelty)               researcher/scientist
-                              │                   already raised
+                    dedup + novelty filter     ←── inline during critic run
+                    (drops duplicates and          (dedup vs prior hunches,
+                     already-raised concerns)       novelty vs dialogue)
+                              │
                               ▼
-                    label bank match          ←── project-level bank of
-                    (semantic similarity)         previously-labeled
-                              │                   hunches (with content)
+                    hunch bank sync            ←── `hunch bank sync`
+                    (cross-run dedup matching       ingests runs into bank
+                     via LLM judge)
               ┌───────────────┼───────────────┐
               ▼               ▼               ▼
-         auto-tp         auto-fp         unlabeled
+         linked to       linked to        new entry
+         existing tp     existing fp      (unlabeled)
               │               │               │
               │               │               ▼
               │               │       annotation UI ←── Scientist
@@ -41,14 +43,15 @@ The annotation tool is the bottleneck. If labeling is painful, nobody does it. I
               └───────────────┴───────────────┘
                               │
                               ▼
-                       labels.jsonl  ──→ append to label bank
-                              │              (grows over time)
+                    .hunch/bank/hunch_bank.jsonl
+                    (event-sourced, grows over time)
+                              │
                               ▼
                        eval_report.json  ←── shareable
                         (no raw content)
 ```
 
-**The flywheel:** each session is shorter than the last. As the bank accumulates, more hunches auto-match and the Scientist only sees genuinely new concerns. This makes labeling rewarding (no repeats) and keeps precision measurement consistent across runs (the same concern always gets the same label).
+**The flywheel:** each session is shorter than the last. As the bank accumulates, more hunches match existing entries at sync time and the Scientist only sees genuinely new concerns in the annotation UI. This makes labeling rewarding (no repeats) and keeps precision measurement consistent across runs (the same concern always gets the same label).
 
 ## Replay format
 
@@ -104,52 +107,48 @@ One file per run directory, append-only JSONL. Each line:
 
 ## The label bank
 
-`.hunch/label_bank.jsonl` — project-level append-only store of every labeled hunch, with content. Lives alongside `.hunch/replay/` but outside any individual run directory. This is what makes the flywheel work.
+**Status:** Implemented. See [`hunch_bank_design.md`](hunch_bank_design.md) for the full design (event schemas, label resolution algorithm, scenarios).
 
-Each entry:
+The bank lives at `.hunch/bank/` — a project-level directory alongside `.hunch/replay/` and `.hunch/eval/`. It consolidates hunches from all eval runs into a single event-sourced store, dedup-matching across runs so the same concern gets one canonical entry and one label.
 
-```json
-{
-  "bank_id": "lb-0042",
-  "label": "tp",
-  "category": "confound",
-  "smell": "4-bit + SDPA diagnosed broken in exp-004 but relied on as working in exp-006",
-  "description": "In c-0612, the scientist removed attn_implementation='eager'...",
-  "source_run": "ar_v1_run03",
-  "source_hunch_id": "h-0003",
-  "labeled_by": "operational_live",
-  "ts": "2026-04-16T09:30:00Z",
-  "matched_by": [
-    {"run": "ar_v1_run07", "hunch_id": "h-0011", "judge_score": 0.87, "ts": "2026-05-03T..."},
-    {"run": "ar_v2_run01", "hunch_id": "h-0002", "judge_score": 0.91, "ts": "2026-05-20T..."}
-  ]
-}
+### Directory layout
+
+```
+.hunch/bank/
+  hunch_bank.jsonl          # append-only event stream (entries, links, labels)
+  runs/<run_name>/
+    hunches.jsonl            # snapshot of run's hunches at ingest time
 ```
 
-**Why content lives in the bank:** matching is by semantic similarity (smell + description). We need the text to compare new hunches against. The bank stays local — it never goes into the shareable report.
+### Event types in `hunch_bank.jsonl`
 
-**Matching against the bank** (before annotation UI):
-An LLM judge compares each new hunch against each bank entry's canonical smell+description. Above a similarity threshold, the new hunch inherits the bank entry's label automatically. The annotation UI only shows what didn't auto-match.
+The bank is event-sourced — current state is computed by folding events in order. Four event types:
 
-**When a match fires:** append a record to the bank entry's `matched_by` list (run, hunch_id, judge score, timestamp). The bank entry's canonical wording does not change. The matched hunch inherits the label via `source: bank` in labels.jsonl.
+- **`entry`** — creates a new bank entry (unique concern). Carries `bank_id`, `canonical_smell`, `canonical_description`, `source_run`, `source_hunch_id`.
+- **`link`** — records that a hunch from another run matches an existing entry. Carries `bank_id`, `run`, `hunch_id`, `judge_score`, `source` (`"ingest"` or `"manual"`).
+- **`label`** — records a human judgment on an entry. Carries `bank_id`, `label` (`"tp"`, `"fp"`, or `null` for retraction), `labeled_by` (tier), `category`, `note`, `tags`.
+- **`tombstone`** — marks a run as excluded from display/dedup (for re-ingest).
 
-**When the Scientist labels a genuinely new hunch in annotation UI:** a new entry is appended to both `labels.jsonl` (per-run) and the bank (project-level) as a new `bank_id`.
+### Sync workflow
 
-### Why record match history but not promote alternatives
+`hunch bank sync` ingests eval runs into the bank:
 
-When a new hunch matches an existing bank entry, we could either (1) just record the match, or (2) add the new hunch's wording as an alternative formulation of the same concern, used for future matching.
+```bash
+hunch bank sync --project-dir /path/to/project --yes
+```
 
-Option 2 is tempting — it hedges against overindexing on whichever wording happened to be captured first. But it risks **cluster drift**: alt N is similar to alt N-1, alt N-1 to alt N-2, but alt N is no longer similar to canonical. Over many runs, everything starts matching everything.
+1. Discovers runs under `.hunch/eval/` (sorted longest-first for best canonical wording).
+2. For each run: reads `hunches.jsonl`, compares each hunch against existing bank entries within a bookmark window (±`window_k`). Matches create link events; unmatched hunches create new entries.
+3. With `--yes`: migrates legacy `labels.jsonl` (per-run label files) into the bank as label events. `duplicate_of` entries create manual links.
+4. After each run, re-reads bank state from disk so cross-run dedup works.
 
-The chosen middle path: **record match history, don't auto-promote.** The `matched_by` field captures which hunches across which runs matched each bank entry, but matching itself still uses one canonical wording per concern. This gives us:
+### Label resolution
 
-- **No proliferation** — cluster shape stays bounded to one entry per concern
-- **Audit value** — "this concern was re-discovered 7 times across 3 critic versions" is a useful signal in its own right
-- **Evidence for later upgrades** — if we ever find matching is brittle, we have raw data to decide *which* alternative wordings to promote, rather than guessing
+The bank resolves each entry's effective label by tier priority: `scientist_retro` > `operational_live` > `anchor` > `legacy_migration` > `mined`. Within a tier, last-write-wins. Labels propagate to all linked hunches automatically.
 
-If paraphrases later prove necessary, the annotation UI can add an opt-in affordance: when the Scientist confirms an auto-match, prompt "promote this wording as an alternative formulation?" — keeps a human in the loop on bank vocabulary, prevents silent drift.
+### Why canonical wording, not alternatives
 
-**Cross-Scientist caveat:** if multiple Scientists contribute labels, `labeled_by` is preserved (`operational_live`, `scientist_retro`, `anchor`, `mined`). Disagreements (same concern labeled tp by one, fp by another) become a separate review queue rather than auto-applying. v0 assumes a single Scientist per project.
+Matching uses one canonical smell+description per concern (the first hunch ingested). This prevents cluster drift — where alternative N is similar to N-1 but not to the original — which would cause unrelated hunches to merge over time. The link history captures all re-discoveries across runs, providing audit value without vocabulary proliferation.
 
 ## Ground truth
 
@@ -249,29 +248,27 @@ hunch eval compare run03 run04
 
 Side-by-side: did precision go up? New catches? Regressions? Deferred until we have multiple labeled runs to compare.
 
-## Implementation plan
+## Implementation status
 
-### Phase 1: Labels + report (minimal, no UI, no bank)
-1. `labels.jsonl` read/write utilities
-2. `hunch eval label <run-dir> <hunch-id> <tp|fp|skip>` — CLI labeling
-3. `hunch eval report <run-dir>` — generates eval_report.json + prints summary
-4. Wire up novelty judge
+### Phase 1: Labels + report — ✓ done
+- `labels.jsonl` read/write utilities
+- `hunch label` CLI (labels a hunch in the current run)
+- Novelty + dedup filter wired into online and offline pipelines
 
-### Phase 2: Label bank + auto-matching
-1. `label_bank.jsonl` read/write utilities (project-level, beside replay file)
-2. Semantic matcher: compare new hunches against bank entries
-3. `hunch eval automatch <run-dir>` — runs novelty filter → bank match → writes auto-labeled entries to labels.jsonl with `source: bank`
-4. Round-trip: when Scientist labels a new hunch (Phase 1 CLI), also append to bank
+### Phase 2: Label bank + auto-matching — ✓ done
+- Event-sourced bank at `.hunch/bank/hunch_bank.jsonl` (entry, link, label, tombstone events)
+- LLM-based dedup judge for cross-run matching (windowed by bookmark proximity)
+- `hunch bank sync` CLI — ingests eval runs, dedup-matches, migrates legacy labels
+- Label resolution by tier priority with last-write-wins within tier
 
-### Phase 3: Annotation UI
-1. Artifact snapshot reconstruction (from replay buffer)
-2. Dialogue context renderer (from replay buffer, centered on hunch's triggering window)
-3. Browser-based UI: two-pane layout, navigation, labeling hotkeys
-4. Surface only unlabeled hunches by default; option to review auto-matches
-5. `hunch annotate-web --run-dir <dir>` (starts local server)
+### Phase 3: Annotation UI — ✓ done
+- `hunch annotate-web` — browser-based two-pane annotation UI
+- Artifact snapshot reconstruction from replay buffer
+- Dialogue context rendering centered on hunch's triggering window
+- Labels written to bank (when bank exists) or per-run `labels.jsonl`
 
-### Phase 4: Polish
-1. Cross-run comparison
-2. Category suggestions (LLM-assisted)
-3. Resolution tracking (was the concern addressed in conversation?)
-4. Bank hygiene: flag stale entries, surface disagreements between Scientists
+### Phase 4: Polish — in progress
+- `hunch eval report` — not yet implemented
+- Cross-run comparison — not yet implemented
+- Bank-seeded auto-labeling in annotation UI — not yet wired (bank entries exist, but the UI doesn't pre-fill labels from bank matches)
+- Bank hygiene (stale entries, cross-Scientist disagreements) — deferred

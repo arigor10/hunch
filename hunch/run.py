@@ -415,6 +415,7 @@ class Runner:
                     emitted_by_tick=self._tick_counter,
                     bookmark_prev=bookmark_prev,
                     bookmark_now=bookmark_now,
+                    filter_applied=self.hunch_filter.enabled,
                 )
                 self._hunches_emitted += 1
                 if self.log is not None:

@@ -3,26 +3,31 @@
 Local Flask server serving a single-page app with three-column layout:
 hunch list (left), detail pane (center), scrollable conversation (right).
 
+Two modes:
+
+**Project mode** (``--project-dir``): reads from the label bank, shows
+hunches from all eval runs with a run selector, groups by bank entry.
+Labels are written to the bank and propagate across linked hunches.
+
+**Legacy mode** (``--run-dir``): single-run annotation using per-run
+``labels.jsonl``. Still auto-detects and uses the bank for label storage
+if one exists and the run has been synced.
+
 Features:
-- Labels hunches as tp/fp/skip; persists to ``labels.jsonl`` (append-only,
-  last-write-wins). Category and free-text note fields per label.
+- Labels hunches as tp/fp/skip with category and free-text note fields.
 - Keyboard shortcuts: t/f/s for labels, arrow keys for navigation.
-- ``--novel-only``: filter to novel hunches only. Reads
-  ``novelty_summary.json`` from ``--run-dir``.
-- ``--dedup``: exclude duplicate hunches. Reads
-  ``dedup/dedup_summary.json`` from ``--run-dir``.
-- Artifact references (listed under "Artifacts:" in the detail pane) are
-  clickable — opens a modal with the markdown rendered via marked.js.
-  Figures referenced inside artifacts (``figures/*.png``) are also
-  clickable and displayed in a separate modal overlay.
-- Chunk references (c-XXXX) are clickable — scrolls the conversation
-  pane to that tick (centered). The trigger-window link scrolls to the
-  start of the window.
+- ``--novel-only``: filter to novel hunches only (legacy mode).
+- ``--dedup``: exclude duplicate hunches (legacy mode).
+- Artifact references are clickable (markdown modal via marked.js).
+- Chunk references scroll the conversation pane.
 - Conversation auto-scrolls to the trigger-window divider on hunch
   selection. In-window events are highlighted green.
-- Long messages are collapsed with a show-more toggle.
 
 Usage:
+    # Project mode (recommended)
+    hunch annotate-web --project-dir /path/to/project
+
+    # Legacy single-run mode
     hunch annotate-web \\
         --replay-dir /path/to/.hunch/replay \\
         --run-dir data/critic_run_01 \\
@@ -147,6 +152,176 @@ def _write_label(path: Path, record: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bank-aware helpers
+# ---------------------------------------------------------------------------
+
+def _infer_project_dir(run_dir: Path) -> Path | None:
+    """Try to infer project dir from a run dir path.
+
+    Expected layout: ``<project>/.hunch/eval/<run_name>/``
+    """
+    if run_dir.parent.name == "eval" and run_dir.parent.parent.name == ".hunch":
+        return run_dir.parent.parent.parent
+    return None
+
+
+def _discover_runs(eval_dir: Path) -> list[dict]:
+    """Return metadata for each eval run directory."""
+    runs: list[dict] = []
+    if not eval_dir.is_dir():
+        return runs
+    for d in sorted(eval_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        hunches_path = d / "hunches.jsonl"
+        if not hunches_path.exists():
+            continue
+        count = 0
+        unfiltered = 0
+        with open(hunches_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        entry = json.loads(line)
+                        if entry.get("type") == "emit":
+                            count += 1
+                            if not entry.get("filter_applied"):
+                                unfiltered += 1
+                    except json.JSONDecodeError:
+                        pass
+        runs.append({
+            "name": d.name,
+            "hunch_count": count,
+            "selected": True,
+            "unfiltered": unfiltered,
+        })
+    return runs
+
+
+def _load_bank_items(
+    state: Any,
+    eval_dir: Path,
+    selected_runs: list[str],
+) -> list[dict]:
+    """Load hunches from selected runs, grouped by bank entry."""
+    items_by_id: dict[str, dict] = {}
+
+    for run_name in selected_runs:
+        hunches_path = eval_dir / run_name / "hunches.jsonl"
+        if not hunches_path.exists():
+            continue
+        hunches = _load_hunches(hunches_path)
+
+        for h in hunches:
+            bank_id = (
+                state.hunch_to_bank.get((run_name, h["hunch_id"]))
+                if state is not None else None
+            )
+            if bank_id is None:
+                item_id = f"{run_name}:{h['hunch_id']}"
+                items_by_id[item_id] = {
+                    "id": item_id,
+                    "bank_id": None,
+                    "hunch_id": h["hunch_id"],
+                    "canonical_smell": h["smell"],
+                    "canonical_description": h["description"],
+                    "bookmark_prev": h["bookmark_prev"],
+                    "bookmark_now": h["bookmark_now"],
+                    "emitted_by_tick": h["emitted_by_tick"],
+                    "triggering_refs": h["triggering_refs"],
+                    "runs": [run_name],
+                    "source_run": run_name,
+                    "source_hunch_id": h["hunch_id"],
+                    "unsynced": True,
+                }
+                continue
+
+            entry = state.entries.get(bank_id)
+            if bank_id not in items_by_id:
+                items_by_id[bank_id] = {
+                    "id": bank_id,
+                    "bank_id": bank_id,
+                    "hunch_id": h["hunch_id"],
+                    "canonical_smell": entry.canonical_smell if entry else h["smell"],
+                    "canonical_description": (
+                        entry.canonical_description if entry else h["description"]
+                    ),
+                    "bookmark_prev": h["bookmark_prev"],
+                    "bookmark_now": h["bookmark_now"],
+                    "emitted_by_tick": h["emitted_by_tick"],
+                    "triggering_refs": h["triggering_refs"],
+                    "runs": [run_name],
+                    "source_run": entry.source_run if entry else run_name,
+                    "source_hunch_id": (
+                        entry.source_hunch_id if entry else h["hunch_id"]
+                    ),
+                    "unsynced": False,
+                }
+            else:
+                existing = items_by_id[bank_id]
+                if run_name not in existing["runs"]:
+                    existing["runs"].append(run_name)
+
+    return sorted(items_by_id.values(), key=lambda x: x["bookmark_now"])
+
+
+def _resolve_bank_labels(state: Any, items: list[dict]) -> dict[str, dict]:
+    """Resolve labels from bank for each item."""
+    from hunch.bank import resolve_label
+
+    labels: dict[str, dict] = {}
+    for item in items:
+        bid = item.get("bank_id")
+        if bid is None:
+            continue
+        resolved = resolve_label(
+            state, item["source_run"], item["source_hunch_id"],
+        )
+        if resolved.label is None:
+            continue
+
+        note = ""
+        tags: list[str] = []
+        entry = state.entries.get(bid)
+        if entry is not None:
+            run = item["source_run"]
+            hid = item["source_hunch_id"]
+            if resolved.source == "inherited":
+                run = resolved.inherited_from_run
+                hid = resolved.inherited_from_hunch_id
+            matching = [
+                lr for lr in entry.labels
+                if lr.run == run and lr.hunch_id == hid
+                and lr.label is not None
+            ]
+            if matching:
+                latest = max(matching, key=lambda lr: lr.ts)
+                note = latest.note
+                tags = latest.tags
+
+        duplicate_of = None
+        display_tags = []
+        for t in tags:
+            if t.startswith("dup_of:"):
+                duplicate_of = t[len("dup_of:"):]
+            else:
+                display_tags.append(t)
+
+        labels[item["id"]] = {
+            "label": resolved.label,
+            "source": resolved.source,
+            "category": resolved.category,
+            "inherited_from_run": resolved.inherited_from_run,
+            "inherited_from_hunch_id": resolved.inherited_from_hunch_id,
+            "note": note,
+            "tags": display_tags,
+            "duplicate_of": duplicate_of,
+        }
+    return labels
+
+
+# ---------------------------------------------------------------------------
 # HTML template
 # ---------------------------------------------------------------------------
 
@@ -237,7 +412,7 @@ kbd { background: #333; padding: 1px 5px; border-radius: 3px; font-size: 11px; b
 #figure-modal-inner { background: #1a1a2e; border: 1px solid #555; border-radius: 6px; max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column; }
 #figure-modal-body { padding: 16px; overflow: auto; flex: 1; display: flex; justify-content: center; }
 
-#artifact-modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 100; justify-content: center; align-items: center; }
+#artifact-modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.92); z-index: 100; justify-content: center; align-items: center; }
 #artifact-modal.open { display: flex; }
 #artifact-modal-inner { background: #1a1a2e; border: 1px solid #555; border-radius: 6px; width: 70vw; max-height: 85vh; display: flex; flex-direction: column; }
 #artifact-modal-header { padding: 10px 16px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
@@ -253,6 +428,27 @@ kbd { background: #333; padding: 1px 5px; border-radius: 3px; font-size: 11px; b
 #artifact-modal-body table { border-collapse: collapse; margin: 8px 0; }
 #artifact-modal-body th, #artifact-modal-body td { border: 1px solid #444; padding: 4px 8px; }
 #artifact-modal-body th { background: #16213e; }
+
+#run-selector { background: #0d1b2a; padding: 6px 10px; border-bottom: 1px solid #333; }
+#run-selector .run-title { font-size: 11px; color: #888; margin-bottom: 4px; font-weight: bold; }
+#run-selector label { display: block; font-size: 12px; padding: 2px 0; cursor: pointer; color: #ccc; }
+#run-selector label:hover { color: #fff; }
+#run-selector input[type="checkbox"] { margin-right: 6px; }
+.run-count { color: #666; font-size: 10px; }
+
+.hunch-item .run-dots { display: flex; gap: 2px; }
+.run-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.label-source { font-size: 9px; color: #888; font-style: italic; }
+.badge-inherited { background: #1a3a5c; color: #7eb8da; }
+.bank-id { font-size: 10px; color: #666; }
+
+#unsynced-banner { background: #4a3800; color: #ffd54f; padding: 8px 16px; font-size: 12px; display: none; border-bottom: 1px solid #ffd54f; }
+#unsynced-banner.visible { display: block; }
+#unfiltered-banner { background: #5c1a1a; color: #ff8a80; padding: 8px 16px; font-size: 12px; display: none; border-bottom: 1px solid #ff8a80; }
+#unfiltered-banner.visible { display: block; }
+
+#hunch-modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 150; justify-content: center; align-items: center; }
+#hunch-modal.open { display: flex; }
 </style>
 </head>
 <body>
@@ -263,16 +459,21 @@ kbd { background: #333; padding: 1px 5px; border-radius: 3px; font-size: 11px; b
     <span id="position">-/-</span>
     <button class="label-btn btn-tp" onclick="labelCurrent('tp')">TP (t)</button>
     <button class="label-btn btn-fp" onclick="labelCurrent('fp')">FP (f)</button>
-    <button class="label-btn btn-skip" onclick="labelCurrent('skip')">Skip (s)</button>
     <button class="label-btn btn-dup" onclick="startDup()">Dup (d)</button>
+    <button class="label-btn btn-skip" onclick="clearLabel()" id="btn-clear" style="display:none;background:#333;border:1px solid #666">Clear (x)</button>
     <span id="current-label"></span>
     <span class="stats" id="stats"></span>
     <span id="run-dir" style="color:#7eb8da;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:400px" title=""></span>
-    <span id="shortcuts"><kbd>t</kbd> tp  <kbd>f</kbd> fp  <kbd>s</kbd> skip  <kbd>d</kbd> dup  <kbd>&larr;</kbd><kbd>&rarr;</kbd> nav</span>
+    <span id="shortcuts"><kbd>&larr;</kbd><kbd>&rarr;</kbd> nav</span>
 </div>
 
+<div id="unfiltered-banner"></div>
+<div id="unsynced-banner"></div>
 <div id="main">
-    <div id="hunch-list"></div>
+    <div style="display:flex;flex-direction:column;width:220px;flex-shrink:0">
+        <div id="run-selector"></div>
+        <div id="hunch-list" style="flex:1;overflow-y:auto"></div>
+    </div>
     <div id="detail-pane"></div>
     <div id="conv-pane"></div>
 </div>
@@ -289,8 +490,18 @@ kbd { background: #333; padding: 1px 5px; border-radius: 3px; font-size: 11px; b
     </div>
 </div>
 
-<div id="artifact-modal">
-    <div id="artifact-modal-inner">
+<div id="hunch-modal" onclick="closeHunchModal()">
+    <div onclick="event.stopPropagation()" style="background:#1a1a2e;border:1px solid #555;border-radius:6px;width:55vw;max-height:85vh;display:flex;flex-direction:column">
+        <div style="padding:10px 16px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center">
+            <h3 id="hunch-modal-title" style="color:#7eb8da;font-size:14px;margin:0"></h3>
+            <button onclick="closeHunchModal()" style="background:#333;border:1px solid #555;color:#e0e0e0;padding:4px 12px;cursor:pointer;border-radius:3px;font-size:13px">Close (Esc)</button>
+        </div>
+        <div id="hunch-modal-body" style="padding:16px;overflow-y:auto;flex:1;line-height:1.6;font-size:14px"></div>
+    </div>
+</div>
+
+<div id="artifact-modal" onclick="closeArtifact()">
+    <div id="artifact-modal-inner" onclick="event.stopPropagation()">
         <div id="artifact-modal-header">
             <h3 id="artifact-modal-title"></h3>
             <button id="artifact-modal-close" onclick="closeArtifact()">Close (Esc)</button>
@@ -303,31 +514,79 @@ kbd { background: #333; padding: 1px 5px; border-radius: 3px; font-size: 11px; b
 let hunches = [];
 let labels = {};
 let currentIdx = 0;
-const KNOWN_TAGS = ['not_novel', 'borderline', 'interesting'];
+let bankMode = false;
+let availableRuns = [];
+const KNOWN_TAGS = ['not_novel', 'borderline', 'interesting', 'nit'];
 
 async function init() {
-    const [resp, cfgResp] = await Promise.all([
-        fetch('/api/hunches'),
-        fetch('/api/config'),
-    ]);
+    const cfgResp = await fetch('/api/config');
+    const cfg = await cfgResp.json();
+    bankMode = cfg.bank_mode || false;
+    availableRuns = cfg.runs || [];
+
+    const rdEl = document.getElementById('run-dir');
+    rdEl.textContent = cfg.project_dir || cfg.run_dir || '';
+    rdEl.title = rdEl.textContent;
+
+    if (bankMode && availableRuns.length > 0) {
+        renderRunSelector();
+    }
+
+    await refreshHunches();
+}
+
+async function refreshHunches() {
+    let url = '/api/hunches';
+    if (bankMode) {
+        const selected = availableRuns.filter(r => r.selected).map(r => r.name);
+        url += '?runs=' + encodeURIComponent(selected.join(','));
+    }
+    const resp = await fetch(url);
     const data = await resp.json();
     hunches = data.hunches;
     labels = data.labels;
 
-    const cfg = await cfgResp.json();
-    const rdEl = document.getElementById('run-dir');
-    rdEl.textContent = cfg.run_dir;
-    rdEl.title = cfg.run_dir;
+    if (data.unfiltered_runs && data.unfiltered_runs.length > 0) {
+        const ufb = document.getElementById('unfiltered-banner');
+        ufb.textContent = 'Unfiltered runs: ' + data.unfiltered_runs.join(', ') +
+            ' \u2014 from the project directory, run: hunch filter';
+        ufb.classList.add('visible');
+    }
+    if (data.unsynced_runs && data.unsynced_runs.length > 0) {
+        const banner = document.getElementById('unsynced-banner');
+        banner.textContent = 'Unsynced runs: ' + data.unsynced_runs.join(', ') +
+            ' \u2014 from the project directory, run: hunch bank sync --yes';
+        banner.classList.add('visible');
+    }
 
     renderList();
-    if (hunches.length > 0) selectHunch(0);
+    if (hunches.length > 0) selectHunch(Math.min(currentIdx, hunches.length - 1));
     updateStats();
 }
+
+function renderRunSelector() {
+    const el = document.getElementById('run-selector');
+    const checks = availableRuns.map((r, i) =>
+        `<label><input type="checkbox" ${r.selected ? 'checked' : ''} onchange="toggleRun(${i})"> ${esc(r.name)} <span class="run-count">(${r.hunch_count})</span></label>`
+    ).join('');
+    el.innerHTML = `<div class="run-title">Runs</div>${checks}`;
+}
+
+async function toggleRun(idx) {
+    availableRuns[idx].selected = !availableRuns[idx].selected;
+    currentIdx = 0;
+    await refreshHunches();
+}
+
+function itemId(h) { return bankMode ? h.id : h.hunch_id; }
+function itemSmell(h) { return bankMode ? h.canonical_smell : h.smell; }
+function itemDesc(h) { return bankMode ? h.canonical_description : h.description; }
 
 function renderList() {
     const el = document.getElementById('hunch-list');
     el.innerHTML = hunches.map((h, i) => {
-        const lbl = labels[h.hunch_id];
+        const id = itemId(h);
+        const lbl = labels[id];
         let badge = '';
         if (lbl) {
             if (lbl.duplicate_of) {
@@ -335,12 +594,16 @@ function renderList() {
             } else {
                 const cls = 'badge-' + lbl.label;
                 badge = `<span class="label-badge ${cls}">${lbl.label.toUpperCase()}</span>`;
+                if (lbl.source === 'inherited') badge += `<span class="label-source"> inh</span>`;
             }
             const tags = lbl.tags || [];
             if (tags.length) badge += `<span style="color:#7eb8da;font-size:9px;margin-left:2px">${tags.map(t=>t.replace(/_/g,' ')).join(', ')}</span>`;
         }
-        return `<div class="hunch-item ${i === currentIdx ? 'active' : ''}" onclick="selectHunch(${i})" title="${esc(h.smell)}">
-            <span class="hid">${h.hunch_id}</span><span>${badge}</span>
+        const displayId = bankMode ? (h.bank_id || h.hunch_id) : h.hunch_id;
+        const runDots = (bankMode && h.runs && h.runs.length > 1)
+            ? `<span class="run-count" style="margin-left:4px">${h.runs.length}r</span>` : '';
+        return `<div class="hunch-item ${i === currentIdx ? 'active' : ''}" onclick="selectHunch(${i})" title="${esc(itemSmell(h))}">
+            <span class="hid">${displayId}${runDots}</span><span>${badge}</span>
         </div>`;
     }).join('');
 }
@@ -354,38 +617,63 @@ async function selectHunch(idx) {
     renderDetail(h);
     document.getElementById('position').textContent = `${idx+1}/${hunches.length}`;
 
-    const convResp = await fetch(`/api/hunch/${h.hunch_id}/context`);
+    const ctxId = bankMode ? encodeURIComponent(h.id) : h.hunch_id;
+    const convResp = await fetch(`/api/hunch/${ctxId}/context`);
     const convData = await convResp.json();
     renderConversation(convData.events, h.bookmark_prev, h.bookmark_now);
 }
 
 function renderDetail(h) {
-    const lbl = labels[h.hunch_id];
+    const id = itemId(h);
+    const smell = itemSmell(h);
+    const desc = itemDesc(h);
+    const lbl = labels[id];
     let labelDisplay = '';
     if (lbl) {
         const cls = lbl.label === 'tp' ? 'badge-tp' : lbl.label === 'fp' ? 'badge-fp' : 'badge-skip';
         labelDisplay = `<span class="label-badge ${cls}" style="font-size:13px;padding:3px 10px">${lbl.label.toUpperCase()}</span>`;
+        if (lbl.source === 'inherited') {
+            let inhLink = 'inherited';
+            if (lbl.inherited_from_run && lbl.inherited_from_hunch_id) {
+                const srcItem = hunches.find(h => h.source_run === lbl.inherited_from_run && h.source_hunch_id === lbl.inherited_from_hunch_id);
+                if (srcItem) {
+                    const srcId = itemId(srcItem);
+                    inhLink = `<a href="#" class="artifact-link" style="color:#7eb8da" onclick="goToHunch('${esc(srcId)}'); return false;">inherited from ${esc(srcId)}</a>`;
+                } else {
+                    inhLink = `<a href="#" class="artifact-link" style="color:#7eb8da" onclick="openHunchModal('${esc(lbl.inherited_from_run)}', '${esc(lbl.inherited_from_hunch_id)}'); return false;">inherited from ${esc(lbl.inherited_from_run)}:${esc(lbl.inherited_from_hunch_id)}</a>`;
+                }
+            }
+            labelDisplay += ` <span class="label-badge badge-inherited" style="font-size:10px;padding:1px 6px">${inhLink}</span>`;
+        }
         if (lbl.category) labelDisplay += ` <span style="color:#888;font-size:12px">category: ${esc(lbl.category)}</span>`;
     }
     document.getElementById('current-label').innerHTML = labelDisplay;
+    const clearBtn = document.getElementById('btn-clear');
+    clearBtn.style.display = (bankMode && lbl && lbl.source === 'human') ? 'inline-block' : 'none';
 
-    const chunkList = h.triggering_refs.chunks || [];
+    const chunkList = (h.triggering_refs || {}).chunks || [];
     const chunkLinks = chunkList.length
         ? chunkList.map(c => {
             const num = parseInt(c.split('-')[1], 10);
             return `<a href="#" class="artifact-link" onclick="scrollToTick(${num}, 'center'); return false;">${esc(c)}</a>`;
           }).join(', ')
         : '(none)';
-    const artList = h.triggering_refs.artifacts || [];
+    const artList = (h.triggering_refs || {}).artifacts || [];
     const artLinks = artList.length
         ? artList.map(a => `<a href="#" class="artifact-link" onclick="openArtifact('${esc(a)}'); return false;">${esc(a)}</a>`).join(', ')
         : '(none)';
 
+    const displayId = bankMode ? (h.bank_id || h.hunch_id || h.id) : h.hunch_id;
+    const bankInfo = (bankMode && h.bank_id) ? `<span class="bank-id">${esc(h.bank_id)}</span> &middot; ` : '';
+    const runsInfo = (bankMode && h.runs && h.runs.length > 0)
+        ? `<div class="meta" style="margin-top:2px">Runs: ${h.runs.map(r => esc(r)).join(', ')}${h.unsynced ? ' <span style="color:#ffd54f">(unsynced)</span>' : ''}</div>` : '';
+
     document.getElementById('detail-pane').innerHTML = `
-        <h2>${esc(h.hunch_id)} ${labelDisplay}</h2>
-        <div class="meta">critic tick ${h.emitted_by_tick} &middot; <a href="#" class="artifact-link" onclick="scrollToTick(${h.bookmark_prev}, 'start'); return false;">conversation window ${h.bookmark_prev}..${h.bookmark_now}</a></div>
-        <div class="smell">${esc(h.smell)}</div>
-        <div class="description">${esc(h.description)}</div>
+        <h2>${esc(displayId)} ${labelDisplay}</h2>
+        <div class="meta">${bankInfo}critic tick ${h.emitted_by_tick} &middot; <a href="#" class="artifact-link" onclick="scrollToTick(${h.bookmark_prev}, 'start'); return false;">conversation window ${h.bookmark_prev}..${h.bookmark_now}</a></div>
+        ${runsInfo}
+        <div class="smell">${esc(smell)}</div>
+        <div class="description">${esc(desc)}</div>
         <div class="refs">Refs: ${chunkLinks}<br>Artifacts: ${artLinks}</div>
         <div id="note-section">
             <label>Tags:</label>
@@ -460,37 +748,45 @@ function toggleExpand(tickSeq) {
 async function labelCurrent(label) {
     const h = hunches[currentIdx];
     if (!h) return;
+    const id = itemId(h);
     const cat = document.getElementById('category-input')?.value || '';
     const note = document.getElementById('note-input')?.value || '';
     const tags = getCurrentTags();
-    await fetch(`/api/hunch/${h.hunch_id}/label`, {
+    await fetch(`/api/hunch/${encodeURIComponent(id)}/label`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ label, category: cat, note, tags }),
     });
-    const resp = await fetch('/api/hunches');
-    const data = await resp.json();
-    labels = data.labels;
-    renderList();
-    renderDetail(h);
-    updateStats();
+    await refreshHunches();
+}
+
+async function clearLabel() {
+    const h = hunches[currentIdx];
+    if (!h) return;
+    const id = itemId(h);
+    await fetch(`/api/hunch/${encodeURIComponent(id)}/label`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ label: '__clear__' }),
+    });
+    await refreshHunches();
 }
 
 async function updateMeta() {
     const h = hunches[currentIdx];
     if (!h) return;
-    const lbl = labels[h.hunch_id];
+    const id = itemId(h);
+    const lbl = labels[id];
     if (!lbl) return;
     const cat = document.getElementById('category-input')?.value || '';
     const note = document.getElementById('note-input')?.value || '';
     const tags = getCurrentTags();
-    await fetch(`/api/hunch/${h.hunch_id}/label`, {
+    await fetch(`/api/hunch/${encodeURIComponent(id)}/label`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ label: lbl.label, category: cat, note, tags }),
     });
-    const resp = await fetch('/api/hunches');
-    labels = (await resp.json()).labels;
+    await refreshHunches();
 }
 
 function renderTagButtons(lbl) {
@@ -503,45 +799,50 @@ function renderTagButtons(lbl) {
 }
 
 function getCurrentTags() {
-    const lbl = labels[hunches[currentIdx]?.hunch_id];
+    const h = hunches[currentIdx];
+    if (!h) return [];
+    const lbl = labels[itemId(h)];
     return (lbl && lbl.tags) || [];
 }
 
 async function toggleTag(tag) {
     const h = hunches[currentIdx];
     if (!h) return;
-    const lbl = labels[h.hunch_id];
+    const id = itemId(h);
+    const lbl = labels[id];
     if (!lbl) return;
     const tags = [...getCurrentTags()];
     const idx = tags.indexOf(tag);
     if (idx >= 0) tags.splice(idx, 1);
     else tags.push(tag);
-    await fetch(`/api/hunch/${h.hunch_id}/label`, {
+    await fetch(`/api/hunch/${encodeURIComponent(id)}/label`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ label: lbl.label, category: lbl.category || '', note: lbl.note || '', tags }),
     });
-    const resp = await fetch('/api/hunches');
-    labels = (await resp.json()).labels;
-    document.getElementById('tag-toggles').innerHTML = renderTagButtons(labels[h.hunch_id]);
+    await refreshHunches();
+    const updatedLbl = labels[id];
+    document.getElementById('tag-toggles').innerHTML = renderTagButtons(updatedLbl);
 }
 
 function goToHunch(hunchId) {
-    const idx = hunches.findIndex(h => h.hunch_id === hunchId);
+    const idx = hunches.findIndex(h => itemId(h) === hunchId);
     if (idx >= 0) selectHunch(idx);
 }
 
 function startDup() {
     const h = hunches[currentIdx];
     if (!h) return;
+    const hId = itemId(h);
     const picker = document.getElementById('dup-picker');
     const select = document.getElementById('dup-target');
     const options = hunches
-        .filter(o => o.hunch_id !== h.hunch_id)
+        .filter(o => itemId(o) !== hId)
         .map(o => {
-            const oLbl = labels[o.hunch_id];
+            const oId = itemId(o);
+            const oLbl = labels[oId];
             const lblTag = oLbl ? ` [${oLbl.label.toUpperCase()}]` : '';
-            return `<option value="${o.hunch_id}">${o.hunch_id}${lblTag} — ${esc(o.smell.substring(0, 80))}</option>`;
+            return `<option value="${oId}">${oId}${lblTag} — ${esc(itemSmell(o).substring(0, 80))}</option>`;
         });
     select.innerHTML = options.join('');
     picker.classList.add('open');
@@ -555,6 +856,7 @@ function cancelDup() {
 async function confirmDup() {
     const h = hunches[currentIdx];
     if (!h) return;
+    const hId = itemId(h);
     const targetId = document.getElementById('dup-target').value;
     if (!targetId) return;
     const targetLabel = labels[targetId];
@@ -562,26 +864,25 @@ async function confirmDup() {
     const cat = document.getElementById('category-input')?.value || '';
     const note = document.getElementById('note-input')?.value || '';
     const tags = getCurrentTags();
-    await fetch(`/api/hunch/${h.hunch_id}/label`, {
+    await fetch(`/api/hunch/${encodeURIComponent(hId)}/label`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ label: inheritedLabel, category: cat, note, tags, duplicate_of: targetId }),
     });
-    const resp = await fetch('/api/hunches');
-    labels = (await resp.json()).labels;
     document.getElementById('dup-picker').classList.remove('open');
-    renderList();
-    renderDetail(h);
-    updateStats();
+    await refreshHunches();
 }
 
 function updateStats() {
     const total = hunches.length;
-    const labeled = Object.keys(labels).length;
-    const tp = Object.values(labels).filter(l => l.label === 'tp').length;
-    const fp = Object.values(labels).filter(l => l.label === 'fp').length;
-    const skip = Object.values(labels).filter(l => l.label === 'skip').length;
-    document.getElementById('stats').textContent = `${labeled}/${total} labeled | ${tp} tp ${fp} fp ${skip} skip`;
+    const ids = new Set(hunches.map(h => itemId(h)));
+    const relevantLabels = Object.entries(labels).filter(([k]) => ids.has(k));
+    const labeled = relevantLabels.length;
+    const tp = relevantLabels.filter(([,l]) => l.label === 'tp').length;
+    const fp = relevantLabels.filter(([,l]) => l.label === 'fp').length;
+    const inherited = relevantLabels.filter(([,l]) => l.source === 'inherited').length;
+    const inhNote = inherited > 0 ? ` (${inherited} inherited)` : '';
+    document.getElementById('stats').textContent = `${labeled}/${total} labeled${inhNote} | ${tp} tp ${fp} fp`;
 }
 
 function nextHunch() { if (currentIdx < hunches.length - 1) selectHunch(currentIdx + 1); }
@@ -654,7 +955,43 @@ function closeFigure() {
     document.getElementById('figure-modal').classList.remove('open');
 }
 
+async function openHunchModal(run, hunchId) {
+    const resp = await fetch(`/api/hunch-detail/${encodeURIComponent(run)}/${encodeURIComponent(hunchId)}`);
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+    const h = data;
+    document.getElementById('hunch-modal-title').textContent = `${run}:${hunchId}`;
+
+    const chunkList = (h.triggering_refs || {}).chunks || [];
+    const chunkLinks = chunkList.length
+        ? chunkList.map(c => {
+            const num = parseInt(c.split('-')[1], 10);
+            return `<a href="#" class="artifact-link" onclick="closeHunchModal(); scrollToTick(${num}, 'center'); return false;">${esc(c)}</a>`;
+          }).join(', ')
+        : '(none)';
+    const artList = (h.triggering_refs || {}).artifacts || [];
+    const artLinks = artList.length
+        ? artList.map(a => `<a href="#" class="artifact-link" onclick="closeHunchModal(); openArtifact('${esc(a)}'); return false;">${esc(a)}</a>`).join(', ')
+        : '(none)';
+
+    document.getElementById('hunch-modal-body').innerHTML = `
+        <div style="margin-bottom:8px;color:#888;font-size:12px">Run: ${esc(run)} &middot; Hunch: ${esc(hunchId)} &middot; tick ${h.emitted_by_tick} &middot; window ${h.bookmark_prev}..${h.bookmark_now}</div>
+        <div style="font-size:15px;font-weight:bold;margin-bottom:12px;color:#fff">${esc(h.smell)}</div>
+        <div style="white-space:pre-wrap;margin-bottom:16px;line-height:1.6">${esc(h.description)}</div>
+        <div style="color:#888;font-size:12px">Refs: ${chunkLinks}<br>Artifacts: ${artLinks}</div>
+    `;
+    document.getElementById('hunch-modal').classList.add('open');
+}
+
+function closeHunchModal() {
+    document.getElementById('hunch-modal').classList.remove('open');
+}
+
 document.addEventListener('keydown', (e) => {
+    if (document.getElementById('hunch-modal').classList.contains('open')) {
+        if (e.key === 'Escape') closeHunchModal();
+        return;
+    }
     if (document.getElementById('figure-modal').classList.contains('open')) {
         if (e.key === 'Escape') closeFigure();
         return;
@@ -671,10 +1008,6 @@ document.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
     if (e.key === 'ArrowRight') nextHunch();
     else if (e.key === 'ArrowLeft') prevHunch();
-    else if (e.key === 't') labelCurrent('tp');
-    else if (e.key === 'f') labelCurrent('fp');
-    else if (e.key === 's') labelCurrent('skip');
-    else if (e.key === 'd') startDup();
 });
 
 init();
@@ -699,7 +1032,8 @@ def _load_dedup_ids(path: Path) -> set[str] | None:
 
 def create_app(
     replay_dir: Path,
-    run_dir: Path,
+    run_dir: Path | None = None,
+    project_dir: Path | None = None,
     novel_only: bool = False,
     dedup: bool = False,
 ) -> Any:
@@ -710,19 +1044,56 @@ def create_app(
 
     _validate_replay_dir(replay_dir)
     conversation = _load_conversation(replay_dir / "conversation.jsonl")
-    hunches = _load_hunches(run_dir / "hunches.jsonl")
 
-    if novel_only:
-        novel_ids = _load_novel_ids(run_dir / "novelty_summary.json")
-        if novel_ids is not None:
-            hunches = [h for h in hunches if h["hunch_id"] in novel_ids]
+    # Determine bank mode vs legacy mode
+    bank_mode = False
+    bank_state = None
+    bank_path = None
+    eval_dir = None
+    available_runs: list[dict] = []
 
-    if dedup:
-        dup_ids = _load_dedup_ids(run_dir / "dedup" / "dedup_summary.json")
-        if dup_ids is not None:
-            hunches = [h for h in hunches if h["hunch_id"] not in dup_ids]
+    if project_dir is not None:
+        eval_dir = project_dir / ".hunch" / "eval"
+        bank_dir = project_dir / ".hunch" / "bank"
+        bank_path = bank_dir / "hunch_bank.jsonl"
+        bank_mode = True
+        if bank_path.exists():
+            from hunch.bank import read_bank
+            bank_state = read_bank(bank_path)
+        available_runs = _discover_runs(eval_dir)
+    elif run_dir is not None:
+        inferred = _infer_project_dir(run_dir)
+        if inferred is not None:
+            eval_dir = inferred / ".hunch" / "eval"
+            bank_dir = inferred / ".hunch" / "bank"
+            bank_path = bank_dir / "hunch_bank.jsonl"
+            if bank_path.exists():
+                from hunch.bank import read_bank
+                bank_state = read_bank(bank_path)
+                bank_mode = True
+                available_runs = _discover_runs(eval_dir)
+                run_name = run_dir.name
+                for r in available_runs:
+                    r["selected"] = (r["name"] == run_name)
 
-    labels_path = run_dir / "labels.jsonl"
+    # Legacy mode: load hunches from single run dir
+    legacy_hunches: list[dict] = []
+    labels_path: Path | None = None
+    if not bank_mode and run_dir is not None:
+        legacy_hunches = _load_hunches(run_dir / "hunches.jsonl")
+        if novel_only:
+            novel_ids = _load_novel_ids(run_dir / "novelty_summary.json")
+            if novel_ids is not None:
+                legacy_hunches = [
+                    h for h in legacy_hunches if h["hunch_id"] in novel_ids
+                ]
+        if dedup:
+            dup_ids = _load_dedup_ids(run_dir / "dedup" / "dedup_summary.json")
+            if dup_ids is not None:
+                legacy_hunches = [
+                    h for h in legacy_hunches if h["hunch_id"] not in dup_ids
+                ]
+        labels_path = run_dir / "labels.jsonl"
 
     app = Flask(__name__)
 
@@ -733,28 +1104,69 @@ def create_app(
     @app.route("/api/config")
     def api_config():
         return jsonify({
-            "run_dir": str(run_dir.resolve()),
+            "run_dir": str(run_dir.resolve()) if run_dir else "",
+            "project_dir": str(project_dir.resolve()) if project_dir else "",
             "replay_dir": str(replay_dir.resolve()),
+            "bank_mode": bank_mode,
+            "runs": available_runs,
         })
 
     @app.route("/api/hunches")
     def api_hunches():
+        if bank_mode:
+            runs_param = request.args.get("runs", "")
+            if runs_param:
+                selected = runs_param.split(",")
+            else:
+                selected = [r["name"] for r in available_runs if r["selected"]]
+            items = _load_bank_items(bank_state, eval_dir, selected)
+
+            unsynced = [
+                it["source_run"] for it in items
+                if it.get("unsynced")
+            ]
+            unsynced_runs = sorted(set(unsynced))
+            unfiltered_runs = [
+                r["name"] for r in available_runs
+                if r.get("unfiltered", 0) > 0
+            ]
+
+            labels_dict = _resolve_bank_labels(bank_state, items)
+            return jsonify({
+                "hunches": items,
+                "labels": labels_dict,
+                "bank_mode": True,
+                "unsynced_runs": unsynced_runs,
+                "unfiltered_runs": unfiltered_runs,
+            })
         return jsonify({
-            "hunches": hunches,
-            "labels": _read_labels(labels_path),
+            "hunches": legacy_hunches,
+            "labels": _read_labels(labels_path) if labels_path else {},
+            "bank_mode": False,
+            "unsynced_runs": [],
         })
 
-    @app.route("/api/hunch/<hunch_id>/context")
-    def api_context(hunch_id: str):
-        hunch = next((h for h in hunches if h["hunch_id"] == hunch_id), None)
-        if hunch is None:
+    @app.route("/api/hunch/<path:item_id>/context")
+    def api_context(item_id: str):
+        if bank_mode:
+            items = _load_bank_items(
+                bank_state, eval_dir,
+                [r["name"] for r in available_runs if r["selected"]],
+            )
+            item = next((it for it in items if it["id"] == item_id), None)
+        else:
+            item = next(
+                (h for h in legacy_hunches if h["hunch_id"] == item_id),
+                None,
+            )
+        if item is None:
             return jsonify({"error": "not found"}), 404
 
-        bp = hunch["bookmark_prev"]
-        bn = hunch["bookmark_now"]
+        bp = item["bookmark_prev"]
+        bn = item["bookmark_now"]
 
         chunk_nums = []
-        for c in (hunch.get("triggering_refs") or {}).get("chunks", []):
+        for c in (item.get("triggering_refs") or {}).get("chunks", []):
             try:
                 chunk_nums.append(int(c.split("-")[1]))
             except (IndexError, ValueError):
@@ -771,7 +1183,11 @@ def create_app(
             if lo <= e["tick_seq"] <= hi
             and e["type"] in ("user_text", "assistant_text")
         ]
-        return jsonify({"events": events, "bookmark_prev": bp, "bookmark_now": bn})
+        return jsonify({
+            "events": events,
+            "bookmark_prev": bp,
+            "bookmark_now": bn,
+        })
 
     @app.route("/api/artifact")
     def api_artifact():
@@ -802,48 +1218,129 @@ def create_app(
             return jsonify({"error": f"figure {name!r} not found"}), 404
         return send_file(fig_path, mimetype="image/png")
 
-    @app.route("/api/hunch/<hunch_id>/label", methods=["POST"])
-    def api_label(hunch_id: str):
+    @app.route("/api/hunch-detail/<run>/<hunch_id>")
+    def api_hunch_detail(run: str, hunch_id: str):
+        if eval_dir is None:
+            return jsonify({"error": "no eval dir"}), 404
+        hunches_path = eval_dir / run / "hunches.jsonl"
+        if not hunches_path.exists():
+            return jsonify({"error": f"run {run!r} not found"}), 404
+        hunches = _load_hunches(hunches_path)
+        h = next((h for h in hunches if h["hunch_id"] == hunch_id), None)
+        if h is None:
+            return jsonify({"error": f"hunch {hunch_id!r} not found in {run}"}), 404
+        return jsonify(h)
+
+    @app.route("/api/hunch/<path:item_id>/label", methods=["POST"])
+    def api_label(item_id: str):
+        nonlocal bank_state
         data = request.get_json()
         label = data.get("label")
-        if label not in ("tp", "fp", "skip"):
+        is_clear = label == "__clear__"
+        if not is_clear and label not in ("tp", "fp"):
             return jsonify({"error": "invalid label"}), 400
 
         tags = data.get("tags", [])
         if not isinstance(tags, list):
             tags = []
         duplicate_of = data.get("duplicate_of") or None
-        ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        record = {
-            "hunch_id": hunch_id,
-            "label": label,
-            "category": data.get("category", ""),
-            "source": "evaluator",
-            "bank_match": None,
-            "note": data.get("note", ""),
-            "tags": tags,
-            "ts": ts,
-        }
-        if duplicate_of:
-            record["duplicate_of"] = duplicate_of
-        _write_label(labels_path, record)
+        ts = _dt.datetime.now(_dt.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+        )
+
+        if bank_mode and bank_path is not None:
+            from hunch.bank import BankWriter
+
+            items = _load_bank_items(
+                bank_state, eval_dir,
+                [r["name"] for r in available_runs],
+            )
+            item = next(
+                (it for it in items if it["id"] == item_id), None,
+            )
+            if item is None:
+                return jsonify({"error": "item not found"}), 404
+
+            bid = item.get("bank_id")
+            if bid is None:
+                return jsonify({
+                    "error": "hunch not synced to bank",
+                }), 400
+
+            write_tags = list(tags)
+            if duplicate_of:
+                write_tags = [
+                    t for t in write_tags if not t.startswith("dup_of:")
+                ]
+                write_tags.append(f"dup_of:{duplicate_of}")
+
+            writer = BankWriter(bank_path)
+            writer.write_label(
+                bank_id=bid,
+                run=item["source_run"],
+                hunch_id=item["source_hunch_id"],
+                label=None if is_clear else label,
+                ts=ts,
+                category=data.get("category", ""),
+                labeled_by="scientist_retro",
+                note=data.get("note", ""),
+                tags=write_tags,
+            )
+
+            # Re-read bank state so subsequent reads are fresh
+            from hunch.bank import read_bank
+            bank_state = read_bank(bank_path)
+
+        elif labels_path is not None:
+            record = {
+                "hunch_id": item_id,
+                "label": label,
+                "category": data.get("category", ""),
+                "source": "evaluator",
+                "bank_match": None,
+                "note": data.get("note", ""),
+                "tags": tags,
+                "ts": ts,
+            }
+            if duplicate_of:
+                record["duplicate_of"] = duplicate_of
+            _write_label(labels_path, record)
+
         return jsonify({"ok": True})
 
     return app
 
 
 def run_server(
-    replay_dir: Path,
-    run_dir: Path,
+    replay_dir: Path | None = None,
+    run_dir: Path | None = None,
+    project_dir: Path | None = None,
     novel_only: bool = False,
     dedup: bool = False,
     port: int = 5555,
 ) -> int:
-    app = create_app(replay_dir, run_dir, novel_only=novel_only, dedup=dedup)
+    if project_dir is not None:
+        if replay_dir is None:
+            replay_dir = project_dir / ".hunch" / "replay"
+    if replay_dir is None:
+        raise SystemExit(
+            "Error: --replay-dir is required (or use --project-dir)"
+        )
+
+    app = create_app(
+        replay_dir,
+        run_dir=run_dir,
+        project_dir=project_dir,
+        novel_only=novel_only,
+        dedup=dedup,
+    )
     print(f"Annotation UI: http://localhost:{port}")
     print(f"  replay: {replay_dir}")
-    print(f"  run:    {run_dir}")
-    print(f"  hunches: {len(app.view_functions)}")
+    if project_dir:
+        print(f"  project: {project_dir}")
+        print(f"  mode: bank (multi-run)")
+    elif run_dir:
+        print(f"  run:    {run_dir}")
     app.run(host="127.0.0.1", port=port, debug=False)
     return 0
 
@@ -851,15 +1348,23 @@ def run_server(
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser(description="Web-based hunch annotation UI")
-    ap.add_argument("--replay-dir", type=Path, required=True)
-    ap.add_argument("--run-dir", type=Path, required=True)
+    ap.add_argument("--project-dir", type=Path, default=None,
+                    help="project root (discovers runs and bank automatically)")
+    ap.add_argument("--replay-dir", type=Path, default=None)
+    ap.add_argument("--run-dir", type=Path, default=None)
     ap.add_argument("--novel-only", action="store_true")
     ap.add_argument("--dedup", action="store_true")
     ap.add_argument("--port", type=int, default=5555)
     args = ap.parse_args()
+    if args.project_dir is None and args.run_dir is None:
+        ap.error("one of --project-dir or --run-dir is required")
     raise SystemExit(run_server(
-        args.replay_dir, args.run_dir,
-        novel_only=args.novel_only, dedup=args.dedup, port=args.port,
+        replay_dir=args.replay_dir,
+        run_dir=args.run_dir,
+        project_dir=args.project_dir,
+        novel_only=args.novel_only,
+        dedup=args.dedup,
+        port=args.port,
     ))
 
 

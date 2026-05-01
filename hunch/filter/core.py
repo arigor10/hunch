@@ -181,6 +181,58 @@ def _call_via_cli(prompt: str, model: str, timeout_s: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Reusable dedup judge factory
+# ---------------------------------------------------------------------------
+
+
+def make_dedup_judge(
+    call_fn: Callable[[str], str],
+    *,
+    max_retries: int = 3,
+    log: Callable[[str], None] | None = None,
+) -> Callable[[str, str, str, str], dict[str, Any]]:
+    """Create a dedup judge from an LLM call function.
+
+    Returns a function with signature
+        (smell_a, desc_a, smell_b, desc_b) -> {"duplicate": bool, "reasoning": str}
+
+    Used by both HunchFilter (within-run dedup) and bank sync (cross-run dedup)
+    to guarantee the same prompt and parsing logic.
+    """
+    template = _load_prompt("judge_dedup.md")
+
+    def judge(
+        smell_a: str, desc_a: str, smell_b: str, desc_b: str,
+    ) -> dict[str, Any]:
+        prompt = template.format(
+            smell_a=smell_a,
+            description_a=desc_a,
+            smell_b=smell_b,
+            description_b=desc_b,
+        )
+        last_exc: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                raw = call_fn(prompt)
+                parsed = _parse_json_response(raw)
+                if parsed is None:
+                    raise ValueError(
+                        f"dedup judge: unparseable response: {raw[:200]}"
+                    )
+                return parsed
+            except Exception as exc:
+                last_exc = exc
+                if log:
+                    log(
+                        f"  [dedup judge] attempt {attempt}/"
+                        f"{max_retries} failed: {exc}"
+                    )
+        raise last_exc  # type: ignore[misc]
+
+    return judge
+
+
+# ---------------------------------------------------------------------------
 # HunchFilter
 # ---------------------------------------------------------------------------
 
@@ -340,20 +392,20 @@ class HunchFilter:
         if not window:
             return None
 
-        template = _load_prompt("judge_dedup.md")
+        judge = make_dedup_judge(
+            self._call_dedup,
+            max_retries=self.max_retries,
+            log=self.log,
+        )
 
-        def _check_one_prior(prior: _PriorHunch) -> str | None:
-            prompt = template.format(
-                smell_a=prior.smell,
-                description_a=prior.description,
-                smell_b=hunch.smell,
-                description_b=hunch.description,
+        def _check_one_prior(prior: _PriorHunch) -> tuple[str, _PriorHunch] | None:
+            result = judge(
+                prior.smell, prior.description,
+                hunch.smell, hunch.description,
             )
-            parsed = self._call_and_parse(
-                lambda: self._call_dedup(prompt), "dedup",
-            )
-            if parsed.get("duplicate") is True:
-                return parsed.get("reasoning", "duplicate of prior hunch")
+            if result.get("duplicate") is True:
+                reason = result.get("reasoning", "duplicate of prior hunch")
+                return reason, prior
             return None
 
         with ThreadPoolExecutor(max_workers=min(len(window), 5)) as pool:
@@ -362,9 +414,9 @@ class HunchFilter:
                 for p in reversed(window)
             }
             for future in as_completed(futures):
-                reason = future.result()
-                if reason is not None:
-                    prior = futures[future]
+                match = future.result()
+                if match is not None:
+                    reason, prior = match
                     for f in futures:
                         f.cancel()
                     return FilterResult(

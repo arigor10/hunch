@@ -494,6 +494,7 @@ def _persist_hunches(
         from hunch.filter import FilterResult
         results = [FilterResult(hunch=h, passed=True) for h in hunches]
 
+    filter_was_on = hunch_filter is not None and hunch_filter.enabled
     emitted = 0
     for fr, hid in zip(results, hunch_ids):
         if fr.passed:
@@ -504,6 +505,7 @@ def _persist_hunches(
                 emitted_by_tick=tick_num,
                 bookmark_prev=bookmark_prev,
                 bookmark_now=bookmark_now,
+                filter_applied=filter_was_on,
             )
             emitted += 1
         else:

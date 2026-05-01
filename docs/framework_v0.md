@@ -316,6 +316,9 @@ Hunch is positioned in VISION as a listener that "slots in alongside" whatever R
 **D10: `prior_hunches` in every Critic tick input.**
 Cheap, underrated. Lets even stateless Critics avoid repeating themselves and learn (weakly) from past feedback without session state.
 
+**D11: Bank is downstream of the replay buffer, not part of it.**
+The replay buffer (`.hunch/replay/`) is the real-time spine — written during a session, consumed by the Critic, never mutated by eval. The label bank (`.hunch/bank/`) is a separate, project-level store that aggregates hunches *across* eval runs via `hunch bank sync`. The bank is event-sourced (`hunch_bank.jsonl`) and holds entries, cross-run links, and labels. It does not participate in the live framework loop — it exists purely for the eval flywheel (see [`eval_infrastructure.md`](eval_infrastructure.md) and [`hunch_bank_design.md`](hunch_bank_design.md)).
+
 ---
 
 ## Deferred decisions (with revisit triggers)

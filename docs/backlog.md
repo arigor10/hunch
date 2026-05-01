@@ -18,7 +18,7 @@ Items that came up during development but aren't blocking current work. Grouped 
 
 ## Eval Infrastructure
 
-- **Label bank not yet implemented.** The eval doc describes a flywheel where labeled hunches accumulate in `.hunch/label_bank.jsonl` and auto-match future hunches. Currently only `labels.jsonl` per eval run exists; there's no cross-run bank, no auto-matching, no bank-seeded labeling. This is the next major eval piece after the annotation UI.
+- **~~Label bank not yet implemented.~~** ✓ Implemented. The label bank lives at `.hunch/bank/hunch_bank.jsonl` (event-sourced). `hunch bank sync` ingests eval runs, dedup-matches hunches across runs via LLM judge, and optionally migrates legacy `labels.jsonl`. See [`hunch_bank_design.md`](hunch_bank_design.md) for the full design.
 
 - **`hunch eval report` not yet implemented.** The shareable report (precision/recall/category breakdown without raw content) is designed but not built.
 

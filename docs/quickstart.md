@@ -2,8 +2,8 @@
 
 Hunch runs in two modes:
 
-- **Live** — runs alongside an active Claude Code session, watching in real time and surfacing hunches as they happen. The Researcher sees them automatically in their next prompt.
-- **Offline** — runs over a past session's transcript after the fact. Useful for evaluating the Critic, reviewing a colleague's session, or tuning parameters.
+- **Live** — runs alongside an active Claude Code session, watching in real time and surfacing hunches as they happen. The [*Researcher*](VISION.md#the-minimal-team) sees them automatically in their next prompt.
+- **Offline** — runs over a past session's transcript after the fact. Useful for evaluating the [*Critic*](VISION.md#the-minimal-team), reviewing a colleague's session, or tuning parameters.
 
 Both use the same Critic and trigger logic. This guide covers live mode first, then [offline](#offline-evaluation).
 
@@ -88,6 +88,8 @@ You can write your own config for any model available on OpenRouter — see [Wri
 
 ### What the logs mean
 
+`hunch run` prints progress to stdout as events flow through the pipeline:
+
 - **`[capture] +N events (tick_seq now M)`** — N new events parsed from the transcript. The framework is seeing your conversation.
 - **`[hook] +N hook event(s)`** — N events from the Stop hook were detected. The Critic may fire if debounce has elapsed.
 - **`[tick t-XXXX] firing (window A..B)`** — the trigger fired. The Critic is being invoked with events A through B.
@@ -102,7 +104,7 @@ You can write your own config for any model available on OpenRouter — see [Wri
 In a third terminal:
 
 ```bash
-hunch panel --replay-dir .hunch/replay
+hunch panel
 ```
 
 This shows a live-updating list of hunches with their statuses. Use keyboard shortcuts to label each hunch as good, bad, or skip. Only hunches labeled "good" are surfaced to the Researcher on your next message. "Bad" suppresses the hunch; "skip" leaves it unlabeled for later review.
@@ -290,15 +292,19 @@ Hunches are written to `hunches.jsonl` inside the output directory.
 hunch list --replay-dir /path/to/project/.hunch/eval/run01
 ```
 
-**[Web annotation UI](eval_infrastructure.md#the-annotation-ui)** (full conversation + hunches side-by-side):
+**[Sync into the bank](#label-bank), then annotate:**
 
 ```bash
-hunch annotate-web \
-  --replay-dir /path/to/project/.hunch/replay \
-  --run-dir /path/to/project/.hunch/eval/run01
+# Sync new hunches into the bank (dedup-matches against existing entries)
+hunch bank sync --project-dir /path/to/project --yes
+
+# Open the annotation UI (project mode — sees all runs + bank)
+hunch annotate-web --project-dir /path/to/project
 ```
 
-Opens at `http://localhost:5555`. Click on a hunch to jump to the conversation context where it was raised.
+Opens at `http://localhost:5555`. Click on a hunch to jump to the conversation context where it was raised. You can switch between eval runs in the sidebar, and labels are read from / written to the bank. If you open the UI before syncing, a yellow banner warns you which runs have unsynced hunches.
+
+See the [Label bank](#label-bank) section for details on the sync workflow.
 
 ---
 ## Appendix
@@ -325,6 +331,41 @@ hunch replay-offline \
 ```
 
 This runs the full pipeline — parsing, trigger, accumulator, prompt assembly — but skips the model call. You'll see how many ticks fire and their bookmark windows, which tells you the Critic's cadence is working correctly.
+
+---
+
+## Label bank
+
+After running the Critic (live or offline), use the bank to consolidate hunches across runs into a single project-level store. The bank dedup-matches hunches via an LLM judge, so the same concern gets the same label everywhere.
+
+### Typical workflow
+
+```bash
+# 1. Run the Critic (produces hunches in .hunch/eval/<run>/)
+hunch replay-offline --replay-dir ... --output-dir .hunch/eval/run01 --config ...
+
+# 2. Sync hunches into the bank (dedup-matches against existing entries)
+hunch bank sync --project-dir /path/to/project --yes
+
+# 3. Annotate (project mode — sees all runs + bank labels)
+hunch annotate-web --project-dir /path/to/project
+```
+
+Step 2 discovers all eval runs under `.hunch/eval/`, ingests their hunches into `.hunch/bank/hunch_bank.jsonl`, and (with `--yes`) migrates any legacy `labels.jsonl` files. New hunches are matched against existing bank entries — duplicates link to the existing entry and inherit its label automatically.
+
+Step 3 opens the annotation UI in bank mode. You can switch between runs in the sidebar. Labels you set are written to the bank and propagate to all linked hunches across runs. The conversation is shown alongside each hunch so you can judge in context.
+
+### Key flags (bank sync)
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--project-dir PATH` | cwd | Project root containing `.hunch/` |
+| `--run NAME` | all | Sync only this eval run |
+| `--yes` | off | Auto-migrate legacy `labels.jsonl` into bank |
+| `--window-k N` | 5 | Dedup comparison window (±N hunches by bookmark) |
+| `--model MODEL` | `claude-haiku-4-5-20251001` | Model for dedup judge |
+
+The bank is append-only and event-sourced — see [`hunch_bank_design.md`](hunch_bank_design.md) for the full design.
 
 ---
 
