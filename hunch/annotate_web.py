@@ -177,6 +177,7 @@ def _discover_runs(eval_dir: Path) -> list[dict]:
         if not hunches_path.exists():
             continue
         count = 0
+        unfiltered = 0
         with open(hunches_path) as f:
             for line in f:
                 line = line.strip()
@@ -185,9 +186,16 @@ def _discover_runs(eval_dir: Path) -> list[dict]:
                         entry = json.loads(line)
                         if entry.get("type") == "emit":
                             count += 1
+                            if not entry.get("filter_applied"):
+                                unfiltered += 1
                     except json.JSONDecodeError:
                         pass
-        runs.append({"name": d.name, "hunch_count": count, "selected": True})
+        runs.append({
+            "name": d.name,
+            "hunch_count": count,
+            "selected": True,
+            "unfiltered": unfiltered,
+        })
     return runs
 
 
@@ -206,7 +214,10 @@ def _load_bank_items(
         hunches = _load_hunches(hunches_path)
 
         for h in hunches:
-            bank_id = state.hunch_to_bank.get((run_name, h["hunch_id"]))
+            bank_id = (
+                state.hunch_to_bank.get((run_name, h["hunch_id"]))
+                if state is not None else None
+            )
             if bank_id is None:
                 item_id = f"{run_name}:{h['hunch_id']}"
                 items_by_id[item_id] = {
@@ -433,6 +444,8 @@ kbd { background: #333; padding: 1px 5px; border-radius: 3px; font-size: 11px; b
 
 #unsynced-banner { background: #4a3800; color: #ffd54f; padding: 8px 16px; font-size: 12px; display: none; border-bottom: 1px solid #ffd54f; }
 #unsynced-banner.visible { display: block; }
+#unfiltered-banner { background: #5c1a1a; color: #ff8a80; padding: 8px 16px; font-size: 12px; display: none; border-bottom: 1px solid #ff8a80; }
+#unfiltered-banner.visible { display: block; }
 
 #hunch-modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 150; justify-content: center; align-items: center; }
 #hunch-modal.open { display: flex; }
@@ -454,6 +467,7 @@ kbd { background: #333; padding: 1px 5px; border-radius: 3px; font-size: 11px; b
     <span id="shortcuts"><kbd>&larr;</kbd><kbd>&rarr;</kbd> nav</span>
 </div>
 
+<div id="unfiltered-banner"></div>
 <div id="unsynced-banner"></div>
 <div id="main">
     <div style="display:flex;flex-direction:column;width:220px;flex-shrink:0">
@@ -532,10 +546,16 @@ async function refreshHunches() {
     hunches = data.hunches;
     labels = data.labels;
 
+    if (data.unfiltered_runs && data.unfiltered_runs.length > 0) {
+        const ufb = document.getElementById('unfiltered-banner');
+        ufb.textContent = 'Unfiltered runs: ' + data.unfiltered_runs.join(', ') +
+            ' \u2014 from the project directory, run: hunch filter';
+        ufb.classList.add('visible');
+    }
     if (data.unsynced_runs && data.unsynced_runs.length > 0) {
         const banner = document.getElementById('unsynced-banner');
         banner.textContent = 'Unsynced runs: ' + data.unsynced_runs.join(', ') +
-            ' — run `hunch bank sync` to enable cross-run label propagation';
+            ' \u2014 from the project directory, run: hunch bank sync --yes';
         banner.classList.add('visible');
     }
 
@@ -1036,10 +1056,10 @@ def create_app(
         eval_dir = project_dir / ".hunch" / "eval"
         bank_dir = project_dir / ".hunch" / "bank"
         bank_path = bank_dir / "hunch_bank.jsonl"
+        bank_mode = True
         if bank_path.exists():
             from hunch.bank import read_bank
             bank_state = read_bank(bank_path)
-            bank_mode = True
         available_runs = _discover_runs(eval_dir)
     elif run_dir is not None:
         inferred = _infer_project_dir(run_dir)
@@ -1106,6 +1126,10 @@ def create_app(
                 if it.get("unsynced")
             ]
             unsynced_runs = sorted(set(unsynced))
+            unfiltered_runs = [
+                r["name"] for r in available_runs
+                if r.get("unfiltered", 0) > 0
+            ]
 
             labels_dict = _resolve_bank_labels(bank_state, items)
             return jsonify({
@@ -1113,6 +1137,7 @@ def create_app(
                 "labels": labels_dict,
                 "bank_mode": True,
                 "unsynced_runs": unsynced_runs,
+                "unfiltered_runs": unfiltered_runs,
             })
         return jsonify({
             "hunches": legacy_hunches,

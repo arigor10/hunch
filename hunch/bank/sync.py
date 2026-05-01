@@ -98,6 +98,15 @@ def sync(
     result = SyncResult()
 
     for rname, eval_hunches_path in discovered:
+        unfiltered = check_unfiltered(eval_hunches_path)
+        if unfiltered > 0:
+            if log:
+                log(f"\nSkipping run: {rname} — {unfiltered} unfiltered "
+                    f"hunches. Run `hunch filter` first.")
+            rr = RunSyncResult(run_name=rname, status="skipped:unfiltered")
+            result.runs.append(rr)
+            continue
+
         if log:
             log(f"\nProcessing run: {rname}")
 
@@ -178,6 +187,28 @@ def _count_emitted(path: Path) -> int:
             except json.JSONDecodeError:
                 continue
             if d.get("type") == "emit" and not d.get("filtered"):
+                count += 1
+    return count
+
+
+def check_unfiltered(path: Path) -> int:
+    """Count emit events that have not been through the filter.
+
+    Returns the number of unfiltered emits (0 means fully filtered or
+    no emits at all). Used by sync and annotation tool to refuse
+    operating on unfiltered runs.
+    """
+    count = 0
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if d.get("type") == "emit" and not d.get("filter_applied"):
                 count += 1
     return count
 

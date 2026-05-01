@@ -68,6 +68,7 @@ class HunchRecord:
     status: str
     history: list[dict[str, Any]] = field(default_factory=list)
     filtered: bool = False
+    filter_applied: bool = False
     filter_type: str = ""
     filter_reason: str = ""
     duplicate_of: str | None = None
@@ -135,6 +136,7 @@ class HunchesWriter:
         *,
         bookmark_prev: int,
         bookmark_now: int,
+        filter_applied: bool = False,
     ) -> None:
         """Append an emit event for a freshly-minted hunch.
 
@@ -147,12 +149,18 @@ class HunchesWriter:
         recomputed later) so offline evaluators can pull the same
         dialogue slice the Critic "saw" — essential for novelty /
         duplicate-detection judges.
+
+        `filter_applied` marks that this hunch went through the
+        dedup + novelty filter and passed. Used by the retroactive
+        filter to distinguish "checked and passed" from "never checked".
         """
         self._check_id_monotonicity(hunch_id)
         record = hunch_emit_record(
             hunch, hunch_id, ts, emitted_by_tick,
             bookmark_prev=bookmark_prev, bookmark_now=bookmark_now,
         )
+        if filter_applied:
+            record["filter_applied"] = True
         self._append(record)
 
     def write_filtered(
@@ -312,6 +320,7 @@ def read_current_hunches(
                     triggering_refs=d.get("triggering_refs") or {},
                     status="filtered" if is_filtered else "pending",
                     filtered=is_filtered,
+                    filter_applied=bool(d.get("filter_applied")) or is_filtered,
                     filter_type=d.get("filter_type", "") if is_filtered else "",
                     filter_reason=d.get("filter_reason", "") if is_filtered else "",
                     duplicate_of=d.get("duplicate_of") if is_filtered else None,

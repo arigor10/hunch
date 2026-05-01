@@ -45,6 +45,7 @@ def _write_hunches(run_dir: Path, hunches: list[dict]) -> None:
                 "emitted_by_tick": h.get("emitted_by_tick", 1),
                 "ts": h.get("ts", "2026-04-28T00:00:00Z"),
                 "triggering_refs": h.get("triggering_refs", {"chunks": [], "artifacts": []}),
+                "filter_applied": True,
             }
             f.write(json.dumps(event) + "\n")
 
@@ -90,6 +91,7 @@ def _write_replay_hunches(replay_dir: Path, hunches: list[dict]) -> None:
                 "emitted_by_tick": h.get("emitted_by_tick", 1),
                 "ts": h.get("ts", "2026-04-28T00:00:00Z"),
                 "triggering_refs": h.get("triggering_refs", {"chunks": [], "artifacts": []}),
+                "filter_applied": True,
             }
             f.write(json.dumps(event) + "\n")
 

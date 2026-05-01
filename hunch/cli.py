@@ -245,6 +245,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="port for the local server (default: 5555)",
     )
 
+    filt = sub.add_parser(
+        "filter",
+        help="retroactively apply dedup + novelty filter to an eval run",
+    )
+    filt.add_argument(
+        "--project-dir",
+        type=Path,
+        default=None,
+        help="project directory (default: cwd)",
+    )
+    filt.add_argument(
+        "--run",
+        default=None,
+        help="filter only this run (default: all discovered runs)",
+    )
+    filt.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would be filtered without modifying files",
+    )
+
     bank = sub.add_parser("bank", help="manage the project-level hunch bank")
     bank_sub = bank.add_subparsers(dest="bank_command", metavar="<command>")
     bank_sync = bank_sub.add_parser(
@@ -373,6 +394,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_panel(ns)
     if ns.command == "annotate-web":
         return _cmd_annotate_web(ns)
+    if ns.command == "filter":
+        return _cmd_filter(ns)
     if ns.command == "bank":
         return _cmd_bank(ns)
     if ns.command == "init":
@@ -522,6 +545,245 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
                 f"{cost_str}"
             )
     return 0
+
+
+def _cmd_filter(ns: argparse.Namespace) -> int:
+    """Retroactively apply dedup + novelty filter to eval runs.
+
+    Reads each run's hunches.jsonl, detects unfiltered emits (no
+    filter_applied marker), runs them through HunchFilter tick-by-tick,
+    and rewrites the file. Idempotent: already-filtered runs are
+    skipped; partially-filtered runs resume from where they left off.
+    """
+    import json
+    import shutil
+    import tempfile
+
+    from hunch.critic import Hunch, TriggeringRefs
+    from hunch.filter import HunchFilter
+    from hunch.journal.hunches import read_current_hunches
+
+    project_dir = (ns.project_dir or Path.cwd()).resolve()
+    eval_dir = project_dir / ".hunch" / "eval"
+    replay_dir = project_dir / ".hunch" / "replay"
+
+    if not eval_dir.is_dir():
+        sys.stderr.write(f"hunch filter: no eval dir at {eval_dir}\n")
+        return 1
+    if not replay_dir.is_dir():
+        sys.stderr.write(f"hunch filter: no replay dir at {replay_dir}\n")
+        return 1
+
+    def _log(msg: str) -> None:
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+
+    if ns.run:
+        run_dirs = [eval_dir / ns.run]
+        if not run_dirs[0].is_dir():
+            sys.stderr.write(
+                f"hunch filter: run '{ns.run}' not found in {eval_dir}\n"
+            )
+            return 1
+    else:
+        run_dirs = sorted(
+            p for p in eval_dir.iterdir()
+            if p.is_dir() and (p / "hunches.jsonl").exists()
+        )
+
+    if not run_dirs:
+        _log("hunch filter: no runs found")
+        return 0
+
+    _log(f"hunch filter: {eval_dir}")
+    _log(f"  replay: {replay_dir}")
+    if ns.dry_run:
+        _log("  mode: dry-run (no files modified)")
+    _log("")
+
+    for run_dir in run_dirs:
+        hunches_path = run_dir / "hunches.jsonl"
+        run_name = run_dir.name
+        _log(f"=== {run_name} ===")
+
+        raw_lines = hunches_path.read_text().splitlines()
+        parsed = []
+        for line in raw_lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed.append(json.loads(line))
+            except json.JSONDecodeError:
+                parsed.append(None)
+
+        has_any_filtered = any(
+            d is not None and d.get("type") == "filtered"
+            for d in parsed
+        )
+        unfiltered_emits = [
+            (i, d) for i, d in enumerate(parsed)
+            if d is not None
+            and d.get("type") == "emit"
+            and not d.get("filter_applied")
+        ]
+
+        if has_any_filtered and not unfiltered_emits:
+            _log(f"  already filtered (has filtered events, no unmarked emits)")
+            _log("")
+            continue
+
+        if has_any_filtered:
+            # File has filtered events — the inline filter ran.
+            # Mark remaining unmarked emits as filter_applied.
+            _log(f"  {len(unfiltered_emits)} unmarked emits in already-"
+                 f"filtered file — marking as filter_applied")
+            if not ns.dry_run:
+                for idx, d in unfiltered_emits:
+                    d["filter_applied"] = True
+                    parsed[idx] = d
+                _atomic_rewrite_jsonl(hunches_path, parsed)
+            _log("")
+            continue
+
+        # No filtered events at all — this run was never filtered.
+        # Run the full filter.
+        all_emits = [
+            d for d in parsed
+            if d is not None and d.get("type") == "emit"
+        ]
+        if not all_emits:
+            _log("  no emits to filter")
+            _log("")
+            continue
+
+        _log(f"  {len(all_emits)} emits, {len(unfiltered_emits)} need filtering")
+
+        # Group emits by tick for proper filter sequencing.
+        ticks: dict[int, list[tuple[int, dict]]] = {}
+        for idx, d in enumerate(parsed):
+            if d is None or d.get("type") != "emit":
+                continue
+            tick = d.get("emitted_by_tick", -1)
+            ticks.setdefault(tick, []).append((idx, d))
+
+        hunch_filter = HunchFilter(
+            replay_dir=replay_dir,
+            enabled=True,
+            log=_log,
+        )
+
+        # Seed dedup window with already-filtered emits (for resumability).
+        already_done = read_current_hunches(hunches_path)
+        already_done = [r for r in already_done if r.filter_applied]
+        if already_done:
+            hunch_filter.init_from_existing(already_done)
+            _log(f"  resumed: {len(already_done)} already-filtered in "
+                 f"dedup window")
+
+        import time
+
+        total_to_filter = len(unfiltered_emits)
+        total_passed = 0
+        total_filtered = 0
+        processed = 0
+        t_start = time.monotonic()
+
+        for tick_num in sorted(ticks.keys()):
+            entries = ticks[tick_num]
+            # Skip ticks where all emits are already marked.
+            needs_check = [
+                (idx, d) for idx, d in entries
+                if not d.get("filter_applied")
+            ]
+            if not needs_check:
+                # Still seed the dedup window.
+                for _, d in entries:
+                    from hunch.filter.core import _PriorHunch
+                    hunch_filter._prior_hunches.append(
+                        _PriorHunch(
+                            hunch_id=d["hunch_id"],
+                            smell=d.get("smell", ""),
+                            description=d.get("description", ""),
+                        )
+                    )
+                continue
+
+            # Build Hunch objects for the filter.
+            hunches = []
+            hunch_ids = []
+            for _, d in needs_check:
+                refs = d.get("triggering_refs") or {}
+                hunches.append(Hunch(
+                    smell=d.get("smell", ""),
+                    description=d.get("description", ""),
+                    triggering_refs=TriggeringRefs.from_dict(refs),
+                ))
+                hunch_ids.append(d["hunch_id"])
+
+            bookmark_prev = needs_check[0][1].get("bookmark_prev", 0)
+            bookmark_now = needs_check[0][1].get("bookmark_now", 0)
+
+            results = hunch_filter.filter_batch(
+                hunches, bookmark_prev, bookmark_now,
+                hunch_ids=hunch_ids,
+            )
+
+            for (idx, d), fr in zip(needs_check, results):
+                if fr.passed:
+                    d["filter_applied"] = True
+                    total_passed += 1
+                else:
+                    d["type"] = "filtered"
+                    d["filter_type"] = fr.filter_type
+                    d["filter_reason"] = fr.reason
+                    if fr.duplicate_of:
+                        d["duplicate_of"] = fr.duplicate_of
+                    d["filter_applied"] = True
+                    total_filtered += 1
+                parsed[idx] = d
+
+            processed += len(needs_check)
+
+            # Write after every tick so Ctrl-C doesn't lose progress.
+            if not ns.dry_run:
+                _atomic_rewrite_jsonl(hunches_path, parsed)
+
+            elapsed = time.monotonic() - t_start
+            rate = processed / elapsed if elapsed > 0 else 0
+            remaining = total_to_filter - processed
+            eta_s = remaining / rate if rate > 0 else 0
+            eta_m, eta_sec = divmod(int(eta_s), 60)
+            _log(
+                f"  [{processed}/{total_to_filter}] "
+                f"+{total_filtered} filtered  "
+                f"({rate:.1f}/s, ETA {eta_m}m{eta_sec:02d}s)"
+            )
+
+        _log(f"  total: {total_passed} passed, {total_filtered} filtered")
+
+        _log("")
+
+    return 0
+
+
+def _atomic_rewrite_jsonl(path: Path, entries: list[dict | None]) -> None:
+    """Rewrite a JSONL file atomically (temp file + rename)."""
+    import json
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(
+        dir=path.parent, suffix=".tmp", prefix=path.stem,
+    )
+    try:
+        with open(fd, "w") as f:
+            for entry in entries:
+                if entry is not None:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        Path(tmp).replace(path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _cmd_bank(ns: argparse.Namespace) -> int:
