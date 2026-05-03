@@ -11,11 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from hunch.critic.protocol import Hunch
+from hunch.critic.protocol import Critic, Hunch
 
 
 @dataclass
-class StubCritic:
+class StubCritic(Critic):
     """No-op Critic. Returns an empty hunch list for every tick.
 
     Records the tick arguments in `tick_log` so tests can verify the

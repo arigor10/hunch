@@ -22,7 +22,7 @@ from hunch.critic.accumulator import (
     CriticPromptStream,
     load_prompt_template,
 )
-from hunch.critic.protocol import Hunch, TriggeringRefs
+from hunch.critic.protocol import Critic, Hunch, TriggeringRefs
 
 
 # ---------------------------------------------------------------------------
@@ -108,11 +108,11 @@ class CriticEngineConfig:
 
 
 @dataclass
-class CriticEngine:
+class CriticEngine(Critic):
     """Model-agnostic critic engine.
 
     Construct with an injected Backend. The framework calls init(),
-    tick(), shutdown() — same protocol as SonnetCritic.
+    tick(), shutdown().
     """
     backend: Backend
     config: CriticEngineConfig = field(default_factory=CriticEngineConfig)

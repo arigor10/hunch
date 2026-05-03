@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from hunch.critic.protocol import Hunch, TriggeringRefs
+from hunch.critic.protocol import Critic, Hunch, TriggeringRefs
 from hunch.critic.wiki_contract import validate_contract, validate_wiki
 from hunch.critic.wiki_renderer import read_events_in_range, render_current_block
 from hunch.critic.wiki_workspace import (
@@ -49,7 +49,7 @@ class WikiCriticConfig:
 # WikiCritic
 # ---------------------------------------------------------------------------
 
-class WikiCritic:
+class WikiCritic(Critic):
     def __init__(
         self,
         config: WikiCriticConfig | None = None,
@@ -231,7 +231,7 @@ class WikiCritic:
             "--model", self.config.model,
             "--output-format", "json",
             "--dangerously-skip-permissions",
-            "--tools", "Read,Edit,Write,Grep,Glob",
+            "--tools", "Read,Edit,Write,Grep,Glob,WebSearch,WebFetch",
         ]
         t0 = time.monotonic()
         result = subprocess.run(
@@ -256,8 +256,12 @@ class WikiCritic:
         try:
             envelope = json.loads(result.stdout)
         except json.JSONDecodeError:
-            self._emit(f"[wiki] warning: non-JSON stdout ({len(result.stdout)} chars)")
-            return {"result": result.stdout}
+            self._consecutive_failures += 1
+            self._total_failures += 1
+            raise RuntimeError(
+                f"claude -p returned non-JSON stdout "
+                f"({len(result.stdout)} chars, {elapsed:.0f}s)"
+            )
 
         return envelope
 
@@ -318,7 +322,14 @@ class WikiCritic:
     def _build_tick_prompt(self) -> str:
         parts: list[str] = []
 
-        if self._violations and len(self._violations) <= self.config.max_contract_violations:
+        if self._violations:
+            n = len(self._violations)
+            if n > self.config.max_contract_violations:
+                self._emit(
+                    f"[wiki] WARNING: {n} violations exceeds threshold "
+                    f"({self.config.max_contract_violations}), "
+                    f"still reporting all to agent"
+                )
             parts.append(
                 "IMPORTANT: The following wiki violations were found after "
                 "your last tick. Fix them before proceeding with normal work:\n"
