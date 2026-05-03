@@ -32,18 +32,28 @@ class TriggeringRefs:
 
     `chunks` and `artifacts` point into the replay buffer so the surface
     (and future analytics) can highlight the originating evidence.
+    The wiki critic uses `tick_seqs` (replay buffer sequence numbers)
+    instead of chunk IDs.
     """
     chunks: list[str] = field(default_factory=list)
     artifacts: list[str] = field(default_factory=list)
+    tick_seqs: list[int] = field(default_factory=list)
 
-    def to_dict(self) -> dict[str, list[str]]:
-        return {"chunks": list(self.chunks), "artifacts": list(self.artifacts)}
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "chunks": list(self.chunks),
+            "artifacts": list(self.artifacts),
+        }
+        if self.tick_seqs:
+            d["tick_seqs"] = list(self.tick_seqs)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TriggeringRefs:
         return cls(
             chunks=list(d.get("chunks") or []),
             artifacts=list(d.get("artifacts") or []),
+            tick_seqs=[int(s) for s in (d.get("tick_seqs") or [])],
         )
 
 

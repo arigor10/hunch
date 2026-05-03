@@ -8,6 +8,7 @@ placeholders.
 from __future__ import annotations
 
 import argparse
+from typing import Any
 import sys
 from pathlib import Path
 
@@ -171,11 +172,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     rpo.add_argument(
         "--critic",
-        choices=("stub", "sonnet", "sonnet-dry"),
+        choices=("stub", "sonnet", "sonnet-dry", "wiki", "wiki-dry"),
         default="stub",
         help="critic implementation (default: stub). "
         "sonnet = accumulating v0.1. sonnet-dry = v0.1 with no model "
-        "call.",
+        "call. wiki = agentic wiki critic v1. wiki-dry = wiki with no "
+        "model call.",
+    )
+    rpo.add_argument(
+        "--claude-md",
+        type=Path,
+        default=None,
+        help="custom CLAUDE.md for the wiki critic (default: bundled v1)",
+    )
+    rpo.add_argument(
+        "--seed-docs",
+        type=Path,
+        nargs="+",
+        default=[],
+        help="project doc files to seed the wiki from before tick 1",
     )
     rpo.add_argument(
         "--config",
@@ -467,10 +482,11 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
         hunch_filter.init_from_existing(existing)
 
     import time as _time
-    critic_factory = _resolve_critic_factory(ns.critic, _log, config_path=ns.config)
+    critic_factory = _resolve_critic_factory(ns.critic, _log, config_path=ns.config, ns=ns)
     critic = critic_factory()
     critic_label = _critic_label(ns)
     trigger_cfg = TriggerV1Config(min_debounce_s=ns.min_debounce_s)
+    critic_config: dict[str, Any] = {"output_dir": str(output_dir)}
 
     tick_interval = ns.min_tick_interval_s
     if tick_interval == 0.0 and ns.config is not None:
@@ -494,6 +510,7 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
                 replay_dir=replay_dir,
                 critic=critic,
                 trigger_config=trigger_cfg,
+                critic_config=critic_config,
                 on_log=_log,
                 max_events=ns.max_events,
                 hunch_filter=hunch_filter,
@@ -513,6 +530,7 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
                 replay_dir=replay_dir,
                 critic=critic,
                 trigger_config=trigger_cfg,
+                critic_config=critic_config,
                 on_log=_log,
                 max_events=ns.max_events,
                 hunch_filter=hunch_filter,
@@ -875,7 +893,9 @@ def _critic_label(ns: argparse.Namespace) -> str:
     return ns.critic
 
 
-def _resolve_critic_factory(name: str, log, config_path: Path | None = None):
+def _resolve_critic_factory(
+    name: str, log, config_path: Path | None = None, ns: argparse.Namespace | None = None,
+):
     """Map a --critic name (or --config path) to a zero-arg factory."""
     if config_path is not None:
         from hunch.backend import load_backend, load_config
@@ -903,6 +923,18 @@ def _resolve_critic_factory(name: str, log, config_path: Path | None = None):
         from hunch.critic.sonnet import SonnetCritic, SonnetCriticConfig
         return lambda: SonnetCritic(
             config=SonnetCriticConfig(dry_run=True), log=log,
+        )
+    if name in ("wiki", "wiki-dry"):
+        from hunch.critic.wiki import WikiCritic, WikiCriticConfig
+        claude_md = getattr(ns, "claude_md", None)
+        seed_docs = getattr(ns, "seed_docs", None) or []
+        return lambda: WikiCritic(
+            config=WikiCriticConfig(
+                claude_md_path=claude_md,
+                seed_docs=seed_docs,
+                dry_run=(name == "wiki-dry"),
+            ),
+            log=log,
         )
     raise ValueError(f"unknown --critic value: {name!r}")
 
