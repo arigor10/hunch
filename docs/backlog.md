@@ -4,7 +4,7 @@ Items that came up during development but aren't blocking current work. Grouped 
 
 ## Critic / Model Calls
 
-- **No prompt caching in offline eval.** The Sonnet critic calls `claude --print` per tick — each call is independent, no session reuse, no cache hits. For a 200-tick eval this means paying full input price on every call. Fix: use the SDK client with prompt caching (stable system prompt prefix gets cached across calls within a 5-minute window).
+- **~~No prompt caching in offline eval.~~** ✓ Resolved. The backend unification (engine.py + pluggable backends) means offline eval can use `anthropic_sdk` backend with prompt caching, or any other backend via TOML config. See `configs/` for examples.
 
 - **Log line `proj_tokens == input_tokens` is uninformative.** `projected_tokens()` is called immediately after `update_observed_tokens()`, so it always equals the observation. Should either log `cache_read_input_tokens` separately (useful for diagnosing cache hit rates) or log the projection *before* the call (useful for diagnosing estimation accuracy).
 

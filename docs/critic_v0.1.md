@@ -1,9 +1,9 @@
-# Critic v1 — accumulate + purge with inline state
+# Critic v0.1 — accumulate + purge with inline state
 
 *Status: design notes. Supersedes v0's windowed-snapshot scheme.
 Written 2026-04-15 as the starting point for the implementation.*
 
-## Why v1
+## Why v0.1
 
 v0 fed the Critic a moving window of recent chunks (last N chunks or
 last N tokens). Two problems:

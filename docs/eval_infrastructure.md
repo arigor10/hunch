@@ -201,7 +201,7 @@ Produces `eval_report.json` + prints a human-readable summary.
 
 ```json
 {
-  "critic_version": "sonnet-v1",
+  "critic_version": "sonnet-v0.1",
   "run_date": "2026-04-16",
   "project": "agentic_research",
   "ticks_fired": 12,
@@ -231,7 +231,7 @@ Produces `eval_report.json` + prints a human-readable summary.
 ### Human-readable summary (printed to terminal)
 
 ```
-Critic sonnet-v1 on agentic_research (12 ticks)
+Critic sonnet-v0.1 on agentic_research (12 ticks)
   Hunches: 9 (6 novel, 3 already-raised)
   Labeled: 6/9 — 5 tp, 1 fp (precision 83%)
     └─ 2 auto-matched from label bank, 4 Scientist-labeled
