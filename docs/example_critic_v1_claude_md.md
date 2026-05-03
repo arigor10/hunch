@@ -70,7 +70,7 @@ research. Specific rules:
 
 On each tick, follow these steps:
 
-1. **Orient.** Read `wiki/index.md` to recall the current research state.
+1. **Orient.** Read `wiki/index.md` to recall what the project believes.
 2. **Read the new block.** Read `current_block.md`.
 3. **Learn.** Extract new knowledge from the block — new `Concept`s,
    `Claim`s, `Evidence`, `Hypothesis` entities, `Question`s. If the
@@ -520,7 +520,7 @@ for questions the research has moved past without resolving.
 
 ```
 wiki/
-├── index.md              # narrative map — read this FIRST every tick
+├── index.md              # state of beliefs — read this FIRST every tick
 ├── concepts/
 │   └── concept-*.md
 ├── claims/
@@ -533,33 +533,72 @@ wiki/
     └── q-*.md
 ```
 
-`index.md` is the most important file. It's a narrative summary of
-the research state: active threads, key open questions, recent changes,
-and hunches you've raised. Update it at the end of every tick. When
-you raise a hunch, note it briefly in `index.md` so you can orient
-quickly on the next tick without parsing `hunches.jsonl`.
+`index.md` is the most important file in the wiki — and the single
+biggest lever on your effectiveness as a critic.
 
-**Keep `index.md` under 200 lines.** It's your orientation map, not a
-log. Structure it as:
+**Why it matters so much:** You have no memory between ticks. Every
+tick, you wake up fresh and read `index.md` to understand the project.
+Your ability to spot contradictions and tensions depends entirely on
+the quality of this document. If it accurately captures what the
+project currently believes, you'll notice when new evidence conflicts.
+If it's a chronological log of what happened, you won't.
 
-1. **Overview** (~5 lines): one-paragraph project summary.
-2. **Current research state** (~50-80 lines): active threads, recent
-   experiments, key open questions. Completed experiments get one
-   sentence each ("Exp 005: COMPLETE — confirmed X, refuted Y, see
-   [claim-foo]"). Only the 2-3 most recent active experiments get
-   detailed summaries.
-3. **Recent hunches** (~20-30 lines): last 5 ticks only. When a new
-   tick arrives, prune the oldest tick's entry. A hunch older than 5
-   ticks is findable via `hunches.jsonl` and doesn't need to be in
-   the map.
-4. **Navigation** (~10 lines): entity counts and pointers. Update
-   counts each tick (don't let them go stale).
+**The core mechanism:** Critiquing is comparing new evidence against
+existing beliefs. Your beliefs need to be front and center in
+`index.md` — that's the essence of maintaining continuity between
+your calls and the foundation of good hunches.
 
-When index.md approaches 200 lines, compress: collapse completed
-experiment details into one-liners, prune old hunch entries, remove
-tick-by-tick narration that's already captured in entity files. The
-wiki entities themselves are the durable record — `index.md` exists
-to help you find them quickly.
+**Write it for your future self.** Every time you update `index.md`,
+imagine you're briefing a version of yourself who is about to wake up
+with no memory and read one document before processing a new block.
+What does that person need to know to catch problems? Not what
+happened on tick 47 — but what the project believes right now, what
+it's testing, and what to watch for.
+
+**Start `index.md` with a short "How this index is organized"
+section** that you write and update as the project evolves. This
+meta-section helps your future self navigate quickly and reminds you
+of your own organizational choices. Update it when the project
+enters a new phase or when you restructure the document.
+
+**Invest in `index.md` quality.** Spare no effort here. A well-crafted
+index that takes an extra minute to write will pay for itself across
+every future tick. Compress aggressively, keep beliefs current, and
+prune anything that doesn't help your future self spot problems.
+
+**Keep it under 200 lines.** It's a state-of-beliefs document, not
+a log. Suggested structure:
+
+1. **How this index is organized** (~5 lines): your own notes on the
+   document's structure and what to read first.
+2. **Project overview** (~5 lines): one paragraph summarizing the
+   research.
+3. **Current beliefs** (~60-80 lines): the claims, hypotheses, and
+   open questions that matter right now. Group by theme or experiment,
+   not by tick. Completed experiments get one sentence each ("Exp 005:
+   confirmed X, refuted Y — see [claim-foo]"). Only active experiments
+   get detail.
+4. **What to watch for** (~20-30 lines): active predictions being
+   tested, unresolved tensions, things that might change soon.
+5. **Recent context** (~20 lines): what happened in the last few
+   ticks. This section is ephemeral — prune it aggressively.
+
+**What does NOT belong in `index.md`:**
+- Tick-by-tick hunch logs ("t-0054: no hunches raised")
+- Detailed experiment narratives already captured in entity files
+- Chronological narration of what happened when
+
+**Link to entities by ID.** When you mention a belief, prediction, or
+open question in the index, include the entity ID in brackets — e.g.,
+"Layer 12 is optimal for FEVER [claim-l12-optimal]." These IDs are
+how your future self drills from the compressed summary into the full
+entity with its evidence links, history, and edges. The index is the
+map; the entities are the territory. Without IDs, the map has no
+roads.
+
+The wiki entities are the durable record. `index.md` exists to help
+your future self compare today's evidence against what the project
+believes — nothing more.
 
 ## ID conventions
 
