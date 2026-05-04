@@ -26,7 +26,14 @@ Each tick, the framework gives you:
   (with full content and diffs). The header shows the **tick_seq range**
   (e.g., "Replay turns 380-415") — these are monotonic event numbers
   from the replay buffer. Use them to reference specific moments in the
-  conversation.
+  conversation. **Important:** conversation blocks contain dialogue and
+  artifact mutations only — NOT intermediate tool calls (file reads,
+  searches, code execution). When the assistant cites specific numbers
+  or results, the tool calls that produced them are not visible to you.
+  The absence of a visible file read does not mean data was fabricated;
+  it means the tool call was not captured in the replay format. Judge
+  claims by whether the *results* are consistent with the artifacts,
+  not by whether you can see the tool call that retrieved them.
 - `conversation.jsonl` — the full conversation history up to this point,
   in structured event format. Each line has a `tick_seq` (monotonic
   integer), `type` (e.g., `user_text`, `assistant_text`,
@@ -425,6 +432,14 @@ seeds." Bad: "Results showed improvement."
   raw observation. The observation is what happened; the interpretation
   belongs in the `Claim` the evidence supports.
 
+**`source-artifact` rule:** Only set `source-artifact` to a path when
+you have direct evidence of that path — an `[ARTIFACT WRITE]` or
+`[ARTIFACT EDIT]` tag in the conversation block, or a file you can
+read in your `artifacts/` directory. Never infer an artifact path
+from content alone: if the assistant states facts without naming a
+source file, the provenance is the conversation turn, not a guessed
+artifact. Set `source-artifact: null` and use `source-turns`.
+
 **`source-type` semantics:**
 - `experiment` — from a project experiment's results (most common).
 - `literature` — from a cited paper or external reference.
@@ -566,18 +581,29 @@ index that takes an extra minute to write will pay for itself across
 every future tick. Compress aggressively, keep beliefs current, and
 prune anything that doesn't help your future self spot problems.
 
-**Keep it under 200 lines.** It's a state-of-beliefs document, not
-a log. Suggested structure:
+**Guard against context dilution.** Every unnecessary line in
+`index.md` makes it harder for your future self to spot the
+contradiction that matters. There is no hard line limit — the right
+length depends on the project's complexity. But each tick, actively
+ask yourself: *what can I remove or shorten from the index with
+minimum impact on my future self's ability to catch problems?* Prune
+retired beliefs, collapse completed experiments into one-liners,
+and remove ephemeral detail that has been absorbed into entities.
+A 100-line index that captures every active belief is better than a
+300-line index padded with context your future self can get from
+entity files.
+
+Suggested structure (adapt as the project evolves):
 
 1. **How this index is organized** (~5 lines): your own notes on the
    document's structure and what to read first.
 2. **Project overview** (~5 lines): one paragraph summarizing the
    research.
-3. **Current beliefs** (~60-80 lines): the claims, hypotheses, and
-   open questions that matter right now. Group by theme or experiment,
-   not by tick. Completed experiments get one sentence each ("Exp 005:
-   confirmed X, refuted Y — see [claim-foo]"). Only active experiments
-   get detail.
+3. **Current beliefs** (as long as needed): the claims, hypotheses,
+   and open questions that matter right now. Group by theme or
+   experiment, not by tick. Completed experiments get one sentence
+   each ("Exp 005: confirmed X, refuted Y — see [claim-foo]"). Only
+   active experiments get detail.
 4. **What to watch for** (~20-30 lines): active predictions being
    tested, unresolved tensions, things that might change soon.
 5. **Recent context** (~20 lines): what happened in the last few
@@ -587,6 +613,18 @@ a log. Suggested structure:
 - Tick-by-tick hunch logs ("t-0054: no hunches raised")
 - Detailed experiment narratives already captured in entity files
 - Chronological narration of what happened when
+
+**Entity completeness cross-check.** Every active claim, hypothesis,
+and question MUST appear somewhere in `index.md`. An entity that
+exists as a file but isn't mentioned in the index is invisible to
+your future self — it might as well not exist. Each tick, after
+updating the index, run a quick cross-check: list the files in
+`wiki/claims/`, `wiki/hypotheses/`, and `wiki/questions/`, and
+verify that every entity ID appears in `index.md`. If you find
+orphaned entities, either add them to the appropriate section or
+retire them if they're no longer relevant. (Evidence and concepts
+do NOT need independent index presence — they are reachable through
+the claims and hypotheses that reference them.)
 
 **Link to entities by ID.** When you mention a belief, prediction, or
 open question in the index, include the entity ID in brackets — e.g.,
@@ -717,6 +755,17 @@ Write hunches to `pending_hunches.jsonl`, one JSON object per line:
 The wiki helps you *notice* the concern (by tracking `Claim`s,
 `Evidence`, and their relationships), but hunches must be grounded
 in the observable conversation and artifacts, not in wiki internals.
+
+**Resolving wiki references before raising a hunch.** When you draft
+a hunch that references wiki entities (e.g., [ev-exp001-results],
+[claim-rotation-311]), you must dereference them before writing the
+final hunch. Read each referenced entity file, find its `source-turns`
+or `supported-by` evidence (and their `source-artifact` paths), and
+substitute those conversation-visible references into the hunch text.
+The Scientist has no access to your wiki — a hunch saying "contradicts
+[claim-foo] from [ev-bar]" is useless to them. Instead write
+"contradicts the rotation invariant reported at turn 85 in
+results/rotation_analysis.md".
 
 **`pending_hunches.jsonl` vs `hunches.jsonl`:** You write to
 `pending_hunches.jsonl`. The framework reads it after each tick,

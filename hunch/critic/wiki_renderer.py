@@ -7,7 +7,10 @@ human-readable markdown that the critic agent processes each tick.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 MAX_ARTIFACT_CHARS = 10_000
@@ -118,6 +121,8 @@ def _render_event(event: dict, artifacts_dir: Path) -> str | None:
         cmd = event.get("command", "")
         return f"[FIGURE: {cmd}]\n" if cmd else None
 
+    log.warning("unknown event type '%s' at tick_seq %s, skipping",
+                etype, event.get("tick_seq", "?"))
     return None
 
 

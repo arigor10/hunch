@@ -7,9 +7,12 @@ isolation, and artifact snapshot management.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -52,8 +55,11 @@ def init_workspace(
         docs_dir = workspace / "project_docs"
         docs_dir.mkdir(exist_ok=True)
         for doc in seed_docs:
-            if doc.exists():
-                _copy_if_missing(src=doc, dst=docs_dir / doc.name)
+            if not doc.exists():
+                raise FileNotFoundError(
+                    f"Seed doc not found: {doc} — check --seed-docs paths"
+                )
+            _copy_if_missing(src=doc, dst=docs_dir / doc.name)
 
 
 def copy_events_to_workspace(
@@ -104,12 +110,22 @@ def copy_artifact_snapshots(
             continue
         src = source_artifacts / snapshot
         dst = workspace_artifacts / snapshot
-        if src.exists() and not dst.exists():
+        if not src.exists():
+            log.warning(
+                "artifact snapshot %s referenced in event but not found at %s",
+                snapshot, src,
+            )
+            continue
+        if not dst.exists():
             shutil.copy2(src, dst)
 
 
 def _copy_if_missing(src: Path, dst: Path) -> None:
     if not dst.exists():
+        if not src.exists():
+            raise FileNotFoundError(
+                f"Required source file not found: {src}"
+            )
         shutil.copy2(src, dst)
 
 
@@ -130,6 +146,8 @@ def _write_settings_json(workspace: Path) -> None:
                 f"Write({ws}/**)",
                 f"Grep({ws}/**)",
                 f"Glob({ws}/**)",
+                "WebSearch",
+                "WebFetch",
             ],
         }
     }

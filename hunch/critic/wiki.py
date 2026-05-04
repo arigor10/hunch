@@ -63,7 +63,10 @@ class WikiCritic(Critic):
         self._last_copied_seq: int = 0
         self._tick_count: int = 0
         self._consecutive_failures: int = 0
+        self._setup_attempts: int = 0
         self._violations: list[str] = []
+        self._consecutive_violation_ticks: int = 0
+        self._malformed_hunches: int = 0
 
         self._total_calls: int = 0
         self._total_input_tokens: int = 0
@@ -137,12 +140,10 @@ class WikiCritic(Critic):
         except Exception as e:
             self._total_failures += 1
             self._consecutive_failures += 1
-            self._emit(f"[wiki] {tick_id} claude invocation failed: {e}")
-            if self._consecutive_failures >= 3:
-                raise RuntimeError(
-                    f"WikiCritic: {self._consecutive_failures} consecutive failures"
-                ) from e
-            return []
+            raise RuntimeError(
+                f"WikiCritic: {tick_id} claude invocation failed "
+                f"(consecutive={self._consecutive_failures}): {e}"
+            ) from e
 
         self._accumulate_stats(response)
 
@@ -152,9 +153,22 @@ class WikiCritic(Critic):
                 self._workspace / "wiki_contract.yaml",
             )
             if self._violations:
+                self._consecutive_violation_ticks += 1
                 self._emit(
                     f"[wiki] {tick_id} validation: {len(self._violations)} violation(s)"
                 )
+                if (
+                    len(self._violations) > self.config.max_contract_violations
+                    and self._consecutive_violation_ticks >= 3
+                ):
+                    raise RuntimeError(
+                        f"WikiCritic: {len(self._violations)} violations "
+                        f"persisted for {self._consecutive_violation_ticks} "
+                        f"consecutive ticks (threshold: "
+                        f"{self.config.max_contract_violations})"
+                    )
+            else:
+                self._consecutive_violation_ticks = 0
 
         hunches = self._read_pending_hunches()
         self._emit(
@@ -175,6 +189,7 @@ class WikiCritic(Critic):
         return {
             "calls": self._total_calls,
             "failures": self._total_failures,
+            "malformed_hunches": self._malformed_hunches,
             "input_tokens": self._total_input_tokens,
             "output_tokens": self._total_output_tokens,
             "cached_tokens": 0,
@@ -187,6 +202,12 @@ class WikiCritic(Critic):
     # ---------------------------------------------------------------
 
     def _run_first_tick_setup(self) -> None:
+        self._setup_attempts += 1
+        if self._setup_attempts > 2:
+            raise RuntimeError(
+                f"WikiCritic: contract generation failed on "
+                f"{self._setup_attempts - 1} attempts, aborting"
+            )
         self._emit("[wiki] first tick — generating contract + seeding wiki")
 
         contract_prompt = (
@@ -199,10 +220,18 @@ class WikiCritic(Critic):
             response = self._invoke_claude(contract_prompt)
             self._accumulate_stats(response)
 
-        if self._contract_exists():
-            errors = validate_contract(self._workspace / "wiki_contract.yaml")
-            if errors:
-                self._emit(f"[wiki] contract validation errors: {errors}")
+        if not self._contract_exists():
+            raise RuntimeError(
+                "Contract generation invocation succeeded but "
+                "wiki_contract.yaml was not created. Check agent "
+                "permissions and workspace."
+            )
+
+        errors = validate_contract(self._workspace / "wiki_contract.yaml")
+        if errors:
+            raise RuntimeError(
+                f"Generated contract is invalid: {errors}"
+            )
 
         seed_docs_dir = self._workspace / "project_docs"
         wiki_index = self._workspace / "wiki" / "index.md"
@@ -219,19 +248,26 @@ class WikiCritic(Critic):
             if not self.config.dry_run:
                 response = self._invoke_claude(seed_prompt)
                 self._accumulate_stats(response)
+            if wiki_index.stat().st_size == 0:
+                raise RuntimeError(
+                    "Seed pass invocation succeeded but wiki/index.md "
+                    "is still empty. The agent failed to populate the wiki."
+                )
 
     # ---------------------------------------------------------------
     # Claude invocation
     # ---------------------------------------------------------------
 
     def _invoke_claude(self, prompt: str) -> dict[str, Any]:
+        tools = "Read,Edit,Write,Grep,Glob,WebSearch,WebFetch"
         cmd = [
             "claude",
             "--print",
             "--model", self.config.model,
             "--output-format", "json",
-            "--dangerously-skip-permissions",
-            "--tools", "Read,Edit,Write,Grep,Glob,WebSearch,WebFetch",
+            "--permission-mode", "dontAsk",
+            "--allowedTools", tools,
+            "--tools", tools,
         ]
         t0 = time.monotonic()
         result = subprocess.run(
@@ -275,20 +311,25 @@ class WikiCritic(Critic):
             return []
 
         hunches: list[Hunch] = []
+        total_lines = 0
+        malformed = 0
         for line in path.read_text().splitlines():
             line = line.strip()
             if not line:
                 continue
+            total_lines += 1
             try:
                 d = json.loads(line)
             except json.JSONDecodeError:
-                self._emit(f"[wiki] warning: malformed hunch line: {line[:80]}")
+                malformed += 1
+                log.warning("malformed hunch JSON: %s", line[:80])
                 continue
 
             smell = (d.get("smell") or "").strip()
             description = (d.get("description") or "").strip()
             if not smell or not description:
-                self._emit(f"[wiki] warning: hunch missing smell/description")
+                malformed += 1
+                log.warning("hunch missing smell/description: %s", line[:80])
                 continue
 
             refs = d.get("triggering_refs") or {}
@@ -306,6 +347,18 @@ class WikiCritic(Critic):
                     artifacts=artifacts,
                 ),
             ))
+
+        if malformed:
+            self._malformed_hunches += malformed
+            self._emit(
+                f"[wiki] WARNING: {malformed}/{total_lines} hunch lines "
+                f"malformed or incomplete"
+            )
+        if total_lines > 0 and malformed == total_lines:
+            raise RuntimeError(
+                f"All {total_lines} hunch lines were malformed — "
+                f"agent may be writing wrong format"
+            )
 
         path.write_text("")
         return hunches
@@ -349,7 +402,8 @@ class WikiCritic(Critic):
         if not ws_conv.exists() or ws_conv.stat().st_size == 0:
             return 0
         last_seq = 0
-        for line in ws_conv.read_text().splitlines():
+        parse_errors = 0
+        for line_num, line in enumerate(ws_conv.read_text().splitlines(), 1):
             line = line.strip()
             if not line:
                 continue
@@ -357,14 +411,30 @@ class WikiCritic(Critic):
                 d = json.loads(line)
                 last_seq = max(last_seq, d.get("tick_seq", 0))
             except json.JSONDecodeError:
-                continue
+                parse_errors += 1
+                log.warning(
+                    "conversation.jsonl line %d: malformed JSON: %s",
+                    line_num, line[:80],
+                )
+        if parse_errors > 10:
+            raise RuntimeError(
+                f"conversation.jsonl has {parse_errors} malformed lines — "
+                f"file may be corrupted"
+            )
         return last_seq
 
     def _accumulate_stats(self, response: dict[str, Any]) -> None:
-        usage = response.get("usage") or {}
+        usage = response.get("usage")
         cost = response.get("cost_usd")
+        if usage is None and cost is None:
+            log.warning(
+                "Claude response missing both 'usage' and 'cost_usd' — "
+                "stats will be incomplete. Response keys: %s",
+                list(response.keys()),
+            )
         if cost is not None:
             self._total_cost_usd += float(cost)
+        usage = usage or {}
         cached = (
             usage.get("cache_read_input_tokens", 0)
             + usage.get("cache_creation_input_tokens", 0)

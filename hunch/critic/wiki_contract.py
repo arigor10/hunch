@@ -21,16 +21,26 @@ import yaml
 _FM_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
 
 
+class FrontmatterError(Exception):
+    """YAML frontmatter is present but cannot be parsed."""
+
+
 def _parse_frontmatter(path: Path) -> dict[str, Any] | None:
-    """Extract YAML frontmatter from a markdown file. Returns None on failure."""
+    """Extract YAML frontmatter from a markdown file.
+
+    Returns None if no frontmatter delimiters found.
+    Raises FrontmatterError if delimiters found but YAML is broken.
+    """
     text = path.read_text(errors="replace")
     m = _FM_RE.match(text)
     if not m:
         return None
     try:
         return yaml.safe_load(m.group(1)) or {}
-    except yaml.YAMLError:
-        return None
+    except yaml.YAMLError as e:
+        raise FrontmatterError(
+            f"{path.name}: YAML frontmatter present but malformed: {e}"
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -103,9 +113,13 @@ def validate_wiki(wiki_dir: Path, contract_path: Path) -> list[str]:
         if md_file.name == "index.md":
             continue
 
-        fm = _parse_frontmatter(md_file)
+        try:
+            fm = _parse_frontmatter(md_file)
+        except FrontmatterError as e:
+            errors.append(str(e))
+            continue
         if fm is None:
-            errors.append(f"{md_file.name}: no valid YAML frontmatter")
+            errors.append(f"{md_file.name}: no YAML frontmatter delimiters")
             continue
 
         rel = md_file.relative_to(wiki_dir)
