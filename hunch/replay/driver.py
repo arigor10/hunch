@@ -302,7 +302,7 @@ def run_replay_from_dir(
         for i, te in enumerate(trigger_events):
             if i < start_index:
                 continue
-            if max_events is not None and events_this_run >= max_events:
+            if max_events is not None and absolute_index >= max_events:
                 break
             ticks_before = result.ticks_fired
             state, last_sim_now = _drive_one_event(
