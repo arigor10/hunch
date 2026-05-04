@@ -403,8 +403,8 @@ type: evidence
 created: YYYY-MM-DD
 source-type: experiment | literature | figure | observation | background-knowledge
 source-artifact: <artifact-path> | null
-source-section: <description of where in the artifact this comes from>
-source-turns: [<tick_seq>, ...]
+source-section: <locator within the artifact> | null  # only when source-artifact is set
+source-turns: [<tick_seq>, ...]  # only the specific turns containing the data — NOT the whole block range
 status: current | stale | invalidated
 supports: [<claim-id>, <hyp-id>, ...]
 refutes: [<claim-id>, <hyp-id>, ...]

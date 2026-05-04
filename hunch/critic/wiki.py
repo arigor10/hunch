@@ -21,6 +21,7 @@ from typing import Any, Callable
 from hunch.critic.protocol import Critic, Hunch, TriggeringRefs
 from hunch.critic.wiki_contract import validate_contract, validate_wiki
 from hunch.critic.wiki_renderer import read_events_in_range, render_current_block
+from hunch.critic.wiki_validator import validate_pending_hunches
 from hunch.critic.wiki_workspace import (
     copy_artifact_snapshots,
     copy_events_to_workspace,
@@ -65,6 +66,7 @@ class WikiCritic(Critic):
         self._consecutive_failures: int = 0
         self._setup_attempts: int = 0
         self._violations: list[str] = []
+        self._hunch_violations: list[str] = []
         self._consecutive_violation_ticks: int = 0
         self._malformed_hunches: int = 0
 
@@ -308,9 +310,10 @@ class WikiCritic(Critic):
     def _read_pending_hunches(self) -> list[Hunch]:
         path = self._workspace / "pending_hunches.jsonl"
         if not path.exists() or path.stat().st_size == 0:
+            self._hunch_violations = []
             return []
 
-        hunches: list[Hunch] = []
+        raw_hunches: list[dict[str, Any]] = []
         total_lines = 0
         malformed = 0
         for line in path.read_text().splitlines():
@@ -332,21 +335,7 @@ class WikiCritic(Critic):
                 log.warning("hunch missing smell/description: %s", line[:80])
                 continue
 
-            refs = d.get("triggering_refs") or {}
-            tick_seqs: list[int] = []
-            for s in refs.get("tick_seqs") or []:
-                if isinstance(s, (int, float)):
-                    tick_seqs.append(int(s))
-            artifacts = [str(a) for a in (refs.get("artifacts") or [])]
-
-            hunches.append(Hunch(
-                smell=smell,
-                description=description,
-                triggering_refs=TriggeringRefs(
-                    tick_seqs=tick_seqs,
-                    artifacts=artifacts,
-                ),
-            ))
+            raw_hunches.append(d)
 
         if malformed:
             self._malformed_hunches += malformed
@@ -360,8 +349,45 @@ class WikiCritic(Critic):
                 f"agent may be writing wrong format"
             )
 
-        path.write_text("")
-        return hunches
+        valid_raw, invalid = validate_pending_hunches(
+            raw_hunches, self._workspace,
+        )
+
+        if invalid:
+            self._hunch_violations = []
+            with open(path, "w") as f:
+                for hv in invalid:
+                    f.write(json.dumps(hv.raw) + "\n")
+                    for v in hv.violations:
+                        self._hunch_violations.append(
+                            f"[{(hv.raw.get('smell') or '')[:50]}] {v}"
+                        )
+            self._emit(
+                f"[wiki] {len(invalid)} hunch(es) failed validation, "
+                f"kept in pending for self-correction"
+            )
+        else:
+            self._hunch_violations = []
+            path.write_text("")
+
+        return [self._raw_to_hunch(d) for d in valid_raw]
+
+    @staticmethod
+    def _raw_to_hunch(d: dict[str, Any]) -> Hunch:
+        refs = d.get("triggering_refs") or {}
+        tick_seqs: list[int] = []
+        for s in refs.get("tick_seqs") or []:
+            if isinstance(s, (int, float)):
+                tick_seqs.append(int(s))
+        artifacts = [str(a) for a in (refs.get("artifacts") or [])]
+        return Hunch(
+            smell=(d.get("smell") or "").strip(),
+            description=(d.get("description") or "").strip(),
+            triggering_refs=TriggeringRefs(
+                tick_seqs=tick_seqs,
+                artifacts=artifacts,
+            ),
+        )
 
     # ---------------------------------------------------------------
     # Helpers
@@ -388,6 +414,17 @@ class WikiCritic(Critic):
                 "your last tick. Fix them before proceeding with normal work:\n"
             )
             for v in self._violations:
+                parts.append(f"  - {v}")
+            parts.append("")
+
+        if self._hunch_violations:
+            parts.append(
+                "IMPORTANT: The following hunches from your last tick "
+                "failed validation and were NOT promoted. They are still "
+                "in pending_hunches.jsonl. Fix the violations, then "
+                "rewrite the corrected hunches to pending_hunches.jsonl:\n"
+            )
+            for v in self._hunch_violations:
                 parts.append(f"  - {v}")
             parts.append("")
 

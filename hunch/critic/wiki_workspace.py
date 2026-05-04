@@ -103,21 +103,34 @@ def copy_artifact_snapshots(
     source_artifacts: Path,
     workspace_artifacts: Path,
 ) -> None:
-    """Copy artifact snapshot files referenced by events into the workspace."""
+    """Copy artifact snapshots into the workspace as mirrored project paths.
+
+    For each event with a snapshot, copies the content to
+    ``workspace_artifacts/<project-relative-path>`` (e.g.,
+    ``artifacts/docs/experiments/exp_001_results.md``), overwriting any
+    previous version.  This lets the agent read artifacts at natural paths
+    that match what it sees in conversation blocks.
+    """
     for event in events:
         snapshot = event.get("snapshot")
         if not snapshot:
             continue
         src = source_artifacts / snapshot
-        dst = workspace_artifacts / snapshot
         if not src.exists():
             log.warning(
                 "artifact snapshot %s referenced in event but not found at %s",
                 snapshot, src,
             )
             continue
-        if not dst.exists():
-            shutil.copy2(src, dst)
+        artifact_path = event.get("path")
+        if not artifact_path:
+            log.warning(
+                "artifact event has snapshot %s but no 'path' field", snapshot,
+            )
+            continue
+        dst = workspace_artifacts / artifact_path
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
 
 
 def _copy_if_missing(src: Path, dst: Path) -> None:
