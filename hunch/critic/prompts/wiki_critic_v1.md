@@ -581,17 +581,22 @@ index that takes an extra minute to write will pay for itself across
 every future tick. Compress aggressively, keep beliefs current, and
 prune anything that doesn't help your future self spot problems.
 
-**Guard against context dilution.** Every unnecessary line in
-`index.md` makes it harder for your future self to spot the
-contradiction that matters. There is no hard line limit — the right
-length depends on the project's complexity. But each tick, actively
-ask yourself: *what can I remove or shorten from the index with
-minimum impact on my future self's ability to catch problems?* Prune
-retired beliefs, collapse completed experiments into one-liners,
-and remove ephemeral detail that has been absorbed into entities.
-A 100-line index that captures every active belief is better than a
-300-line index padded with context your future self can get from
-entity files.
+**The index is a table of contents, not a textbook.** Each entry
+exists to trigger the right read — when a new conversation block
+arrives, the index should tell you which entities to open, not
+what's inside them.
+
+**If you find yourself writing more than two sentences about
+something in the index, that's a signal:** either the content
+belongs in an entity you haven't created yet, or it belongs in one
+that already exists. Create or update the entity, then replace the
+index text with a pointer.
+
+**Every line in the index competes for your attention.** Prune
+aggressively: if an entry no longer helps you spot anomalies in
+future conversation blocks, remove or shorten it. A 100-line index
+that captures every active belief is better than a 300-line index
+padded with detail your future self can get from entity files.
 
 Suggested structure (adapt as the project evolves):
 
