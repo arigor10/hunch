@@ -11,7 +11,7 @@ See `docs/framework_v0.md` §Invariant 4 and Appendix A for the
 contract this module implements.
 """
 
-from hunch.journal.append import append_json_line
+from hunch.journal.append import append_json_line, scan_max_numeric_id
 from hunch.journal.hunches import (
     HunchRecord,
     HunchesWriter,
@@ -24,5 +24,6 @@ __all__ = [
     "HunchesWriter",
     "FeedbackWriter",
     "append_json_line",
+    "scan_max_numeric_id",
     "read_current_hunches",
 ]

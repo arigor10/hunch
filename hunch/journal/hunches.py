@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from hunch.critic import Hunch, hunch_emit_record
-from hunch.journal.append import append_json_line
+from hunch.journal.append import append_json_line, scan_max_numeric_id
 
 
 _HUNCH_ID_RE = re.compile(r"^h-(\d+)$")
@@ -229,25 +229,7 @@ class HunchesWriter:
 
     def _scan_max_id(self) -> int:
         """Find the largest existing `h-NNNN` id on disk (or 0 if empty)."""
-        if not self.hunches_path.exists():
-            return 0
-        max_n = 0
-        with open(self.hunches_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                hid = d.get("hunch_id", "")
-                m = _HUNCH_ID_RE.match(hid)
-                if m:
-                    n = int(m.group(1))
-                    if n > max_n:
-                        max_n = n
-        return max_n
+        return scan_max_numeric_id(self.hunches_path, "hunch_id", _HUNCH_ID_RE)
 
     def _append(self, entry: dict[str, Any]) -> None:
         append_json_line(self.hunches_path, entry)

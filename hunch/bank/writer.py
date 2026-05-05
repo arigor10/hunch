@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from hunch.journal.append import append_json_line
+from hunch.journal.append import append_json_line, scan_max_numeric_id
 
 
 _BANK_ID_RE = re.compile(r"^hb-(\d+)$")
@@ -143,25 +143,7 @@ class BankWriter:
             self._last_ts = ts
 
     def _scan_max_id(self) -> int:
-        if not self._bank_path.exists():
-            return 0
-        max_n = 0
-        with open(self._bank_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                bid = d.get("bank_id", "")
-                m = _BANK_ID_RE.match(bid)
-                if m:
-                    n = int(m.group(1))
-                    if n > max_n:
-                        max_n = n
-        return max_n
+        return scan_max_numeric_id(self._bank_path, "bank_id", _BANK_ID_RE)
 
     def _scan_max_ts(self) -> str:
         if not self._bank_path.exists():

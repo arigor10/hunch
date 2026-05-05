@@ -50,8 +50,44 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 from pathlib import Path
 from typing import Any
+
+
+def scan_max_numeric_id(
+    path: Path,
+    field: str,
+    pattern: re.Pattern[str],
+) -> int:
+    """Scan a JSONL file for the largest numeric ID matching ``pattern``.
+
+    Args:
+        path: JSONL file to scan.
+        field: JSON key containing the ID string (e.g. ``"hunch_id"``, ``"bank_id"``).
+        pattern: Compiled regex with one capture group for the numeric part.
+
+    Returns:
+        The largest integer found, or 0 if the file is empty / missing.
+    """
+    if not path.exists():
+        return 0
+    max_n = 0
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            m = pattern.match(d.get(field, ""))
+            if m:
+                n = int(m.group(1))
+                if n > max_n:
+                    max_n = n
+    return max_n
 
 
 def append_json_line(path: Path, entry: dict[str, Any]) -> None:

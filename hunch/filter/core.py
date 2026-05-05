@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from hunch.backend.claude_cli import ClaudeCliBackend
 from hunch.critic.protocol import Hunch
 from hunch.journal.hunches import HunchRecord
 
@@ -138,7 +138,8 @@ def _call_llm(
 ) -> str:
     if client is not None:
         return _call_via_sdk(prompt, model, client)
-    return _call_via_cli(prompt, model, timeout_s)
+    backend = ClaudeCliBackend(model=model, timeout_s=timeout_s)
+    return backend.call(prompt).text
 
 
 def _call_via_sdk(prompt: str, model: str, client: Any) -> str:
@@ -157,27 +158,6 @@ def _call_via_sdk(prompt: str, model: str, client: Any) -> str:
         if isinstance(first, dict):
             return str(first.get("text", ""))
     raise RuntimeError(f"Anthropic SDK returned empty content: {response}")
-
-
-def _call_via_cli(prompt: str, model: str, timeout_s: float) -> str:
-    result = subprocess.run(
-        ["claude", "--print", "--model", model, "--output-format", "json"],
-        input=prompt,
-        cwd="/tmp",
-        capture_output=True,
-        text=True,
-        timeout=timeout_s,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"claude --print exited {result.returncode}: "
-            f"{(result.stderr or result.stdout)[:200]}"
-        )
-    try:
-        envelope = json.loads(result.stdout)
-        return envelope.get("result", "")
-    except json.JSONDecodeError:
-        return result.stdout
 
 
 # ---------------------------------------------------------------------------
