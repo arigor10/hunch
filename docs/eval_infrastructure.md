@@ -29,8 +29,8 @@ The annotation tool is the bottleneck. If labeling is painful, nobody does it. I
                               │
                               ▼
                     hunch bank sync            ←── `hunch bank sync`
-                    (cross-run dedup matching       ingests runs into bank
-                     via LLM judge)
+                    (cross-run dedup matching       ingests eval runs, live
+                     via LLM judge)                 hunches, and mined hunches
               ┌───────────────┼───────────────┐
               ▼               ▼               ▼
          linked to       linked to        new entry
@@ -49,6 +49,15 @@ The annotation tool is the bottleneck. If labeling is painful, nobody does it. I
                               ▼
                        eval_report.json  ←── shareable
                         (no raw content)
+
+                    ─── additional ground-truth path ───
+
+.hunch/replay/ ──→ nose mining ──→ evidence mining ──→ .hunch/mined/<run_name>/hunches.jsonl
+                   (keyword+LLM)   (agent w/ full        (source: "mined", auto-labeled tp)
+                                    history; subsumes              │
+                                    detectability)                 ▼
+                                                         hunch bank sync
+                                                    (same dedup + entry/link logic)
 ```
 
 **The flywheel:** each session is shorter than the last. As the bank accumulates, more hunches match existing entries at sync time and the Scientist only sees genuinely new concerns in the annotation UI. This makes labeling rewarding (no repeats) and keeps precision measurement consistent across runs (the same concern always gets the same label).
@@ -164,7 +173,7 @@ Labels enter the system through three channels, with different epistemic weight:
 
 Live feedback is the most ecologically valid signal — it captures the Scientist's in-the-moment reaction with full session context. But it is not gold-standard ground truth: the bar for pressing "good" is lower than the bar for labeling "tp." The flywheel bridge promotes live feedback to label-bank entries as candidates: good → candidate tp, bad → candidate fp, skip → unlabeled. The `labeled_by` field preserves provenance so downstream consumers can weight accordingly.
 
-**Anchor / mined labels** (`labeled_by: anchor`, `mined`) — hand-curated known-good catches or automated mining of the transcript for moments where the Scientist themselves raised a concern. These are just additional bank entries that participate in auto-matching.
+**Anchor / mined labels** (`labeled_by: anchor`, `mined`) — hand-curated known-good catches or automated mining of the transcript for moments where the Scientist themselves raised a concern. These are just additional bank entries that participate in auto-matching. Mined hunches live in `.hunch/mined/<project>/hunches.jsonl` and enter the bank via `hunch bank sync`. See [hunch_bank_design.md § Mined hunches](hunch_bank_design.md#mined-hunches) for the full pipeline design.
 
 When live feedback and retrospective annotation conflict on the same concern, the live label has higher ecological validity (the Scientist was there) but the retrospective label has higher deliberative confidence (the Scientist investigated). In practice this tension rarely arises — when it does, the annotation UI surfaces the conflict for the Scientist to resolve.
 
