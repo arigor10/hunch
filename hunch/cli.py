@@ -493,6 +493,8 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
         from hunch.backend.config import load_config as _load_config
         tick_interval = _load_config(ns.config).engine.min_tick_interval_s
 
+    _save_run_metadata(ns, output_dir, critic_label)
+
     t0 = _time.monotonic()
     try:
         if ns.claude_log is not None:
@@ -882,6 +884,60 @@ def _try_anthropic_client():
         return anthropic.Anthropic()
     except Exception:
         return None
+
+
+def _save_run_metadata(ns: argparse.Namespace, output_dir: Path, critic_label: str) -> None:
+    """Save run parameters and git info to run_metadata.json in the output dir."""
+    import json
+    import subprocess
+    from datetime import datetime, timezone
+
+    meta_path = output_dir / "run_metadata.json"
+    if meta_path.exists():
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    git_rev = ""
+    git_dirty = False
+    try:
+        git_rev = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=Path(__file__).parent,
+        ).stdout.strip()
+        git_dirty = subprocess.run(
+            ["git", "diff", "--quiet"],
+            capture_output=True, timeout=5,
+            cwd=Path(__file__).parent,
+        ).returncode != 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    args_dict = {}
+    for k, v in vars(ns).items():
+        if k == "func":
+            continue
+        if isinstance(v, Path):
+            args_dict[k] = str(v)
+        elif isinstance(v, list) and v and isinstance(v[0], Path):
+            args_dict[k] = [str(p) for p in v]
+        else:
+            args_dict[k] = v
+
+    metadata = {
+        "command": "replay-offline",
+        "critic_label": critic_label,
+        "args": args_dict,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "hunch_version": __version__,
+        "git_rev": git_rev,
+        "git_dirty": git_dirty,
+    }
+
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
 
 def _critic_label(ns: argparse.Namespace) -> str:
