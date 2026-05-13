@@ -31,7 +31,8 @@ class AnthropicSdkBackend:
             import anthropic
             self.client = anthropic.Anthropic()
 
-    def call(self, prompt: str, cache_break: int | None = None) -> ModelResponse:
+    def call(self, prompt: str, cache_break: int | None = None,
+             suppress_cache_check: bool = False) -> ModelResponse:
         if cache_break and cache_break < len(prompt):
             content: Any = [
                 {"type": "text", "text": prompt[:cache_break],

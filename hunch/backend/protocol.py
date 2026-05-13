@@ -26,4 +26,9 @@ class Backend(Protocol):
     from this index onward is new content. Backends that support
     explicit cache_control use this to split the prompt.
     """
-    def call(self, prompt: str, cache_break: int | None = None) -> ModelResponse: ...
+    def call(
+        self,
+        prompt: str,
+        cache_break: int | None = None,
+        suppress_cache_check: bool = False,
+    ) -> ModelResponse: ...
