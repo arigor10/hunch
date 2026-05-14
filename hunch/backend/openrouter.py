@@ -122,6 +122,7 @@ class OpenRouterBackend:
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     cached_tokens=cached_tokens,
+                    cost_usd=float(cost) if cost is not None else None,
                 )
             except RuntimeError:
                 raise
