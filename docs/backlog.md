@@ -22,6 +22,10 @@ Items that came up during development but aren't blocking current work. Grouped 
 
 - **`hunch eval report` not yet implemented.** The shareable report (precision/recall/category breakdown without raw content) is designed but not built.
 
+## Bank / Dedup Ordering
+
+- **Mined hunches should be deduped before eval hunches.** Currently `hunch bank sync` processes runs in whatever order they're ingested. If eval runs enter the bank before mined runs, eval hunches become dedup anchors and mined hunches get matched against them — inverting the intended hierarchy. Mined hunches are ground truth (what the user actually noticed); they should form the canonical set that eval hunches are measured against. Correct ordering: (1) self-dedup within each mined set, (2) dedup mined sets against each other, (3) match eval hunches against the deduped mined corpus (and against each other). Also verify: are mined hunches currently self-deduped within a single mining run, or only across runs?
+
 ## CLI / UX
 
 - **`input_tokens` calculation sums all three usage fields.** In `_call_model`, `input_tokens = usage.input_tokens + cache_read + cache_create`. The Anthropic API's `input_tokens` field already excludes cached tokens, so this sum is the total prompt size (correct for token bookkeeping) but confusing if read as "tokens billed at full price." Not a bug, but the naming is misleading.
