@@ -141,6 +141,11 @@ def run_nose_mining(
         f"Done: {result.total_findings} findings from {result.total_chunks} chunks, "
         f"${result.total_cost_usd:.3f}"
     )
+    if result.errors > 0:
+        _log(
+            f"  {result.errors} chunk(s) failed. "
+            f"Re-run the same command to retry them."
+        )
     return result
 
 

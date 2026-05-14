@@ -179,6 +179,11 @@ def run_evidence_mining(
         f"{result.total_errors} errors, "
         f"${result.total_cost_usd:.3f}"
     )
+    if result.total_errors > 0:
+        _log(
+            f"  {result.total_errors} finding(s) failed. "
+            f"Re-run the same command to retry them."
+        )
     return result
 
 
