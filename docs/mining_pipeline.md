@@ -2,15 +2,15 @@
 
 **Status:** v1.0 design, 2026-05-13
 
-Ground-truth hunches from historical transcripts. The mining pipeline extracts moments where the Scientist noticed anomalies during a research session, locates the earliest conversation evidence that would let a critic catch the issue, and emits proper hunches with triggering refs.
+Ground-truth hunches from historical transcripts. The mining pipeline extracts moments where the user noticed anomalies during a research session, locates the earliest conversation evidence that would let a critic catch the issue, and emits proper hunches with triggering refs.
 
 ## Why mine?
 
 The critic eval loop needs ground truth: real concerns that a perfect critic *should* have caught. Three sources exist:
 
-1. **Live labels** — the Scientist presses "good" on a hunch during `hunch run`. Ecological but sparse.
-2. **Retrospective annotation** — the Scientist labels critic output after the fact. Deliberate but only covers what the critic *did* say.
-3. **Mining** — extract what the Scientist noticed *regardless* of whether the critic said anything. This is the recall denominator: the full set of catchable concerns.
+1. **Live labels** — the user presses "good" on a hunch during `hunch run`. Ecological but sparse.
+2. **Retrospective annotation** — the user labels critic output after the fact. Deliberate but only covers what the critic *did* say.
+3. **Mining** — extract what the user noticed *regardless* of whether the critic said anything. This is the recall denominator: the full set of catchable concerns.
 
 Mining produces ground-truth hunches that enter the bank via `hunch bank sync`, participate in dedup matching against critic output, and propagate labels to future runs. See [hunch_bank_design.md § Mined hunches](hunch_bank_design.md#mined-hunches).
 
@@ -19,10 +19,11 @@ Mining produces ground-truth hunches that enter the bank via `hunch bank sync`, 
 Two commands, one human-readable intermediate file:
 
 ```
-hunch mine nose                          hunch mine evidence
 conversation.jsonl  →  findings.jsonl  →  hunches.jsonl  →  hunch bank sync
-(find what the                            (find where          (dedup +
- Scientist noticed)                        evidence was)        label tp)
+
+├── hunch mine nose ──┤├─ hunch mine evidence ─┤├── hunch bank sync ──┤
+    find what the          find where the            dedup + label
+    user noticed           evidence was              true positives
 ```
 
 `findings.jsonl` is the seam between the two stages. Users who prefer to label moments by hand can skip `hunch mine nose` entirely and write `findings.jsonl` directly.
@@ -57,12 +58,12 @@ Reads `findings.jsonl` and the replay, runs an agent session per finding, writes
 
 ### What it finds
 
-Explicit moments where the Scientist questioned a result, flagged an inconsistency, or expressed suspicion — stated directly in the conversation text. The signal is a verbatim quote where the Scientist's "nose fired."
+Explicit moments where the user questioned a result, flagged an inconsistency, or expressed suspicion — stated directly in the conversation text. The signal is a verbatim quote where the user's "nose fired."
 
 v1.0 mines only user-raised, explicit anomaly flags. This deliberately excludes:
 
 - **AI-raised findings** — the assistant flagging its own concerns. Useful but not ground truth for measuring whether a separate critic would have caught it.
-- **Implicit detections** — silent course corrections where the Scientist changed approach without stating why. Harder to mine reliably, requires inferring unstated intent.
+- **Implicit detections** — silent course corrections where the user changed approach without stating why. Harder to mine reliably, requires inferring unstated intent.
 - **Missed opportunities** — visible anomalies nobody remarked on. Requires the miner to independently understand the evidence, not just find where someone flagged it.
 
 ### Segmentation
@@ -76,7 +77,7 @@ The conversation (`conversation.jsonl`) is divided into fixed-size windows befor
 ### Mining LLM call
 
 Each window is rendered as readable dialogue (user/assistant turns, artifact write/edit metadata) and sent to a capable LLM (Sonnet-class) with a mining prompt. The prompt:
-- Defines what counts as an explicit nose-firing moment by the Scientist
+- Defines what counts as an explicit nose-firing moment by the user
 - Includes generic calibration examples covering common patterns (question-form anomaly detection, directional violations, subset-containment failures)
 - Specifies sensitivity rules (e.g., questions presupposing anomalies count — "why would X go down?" is anomaly detection even if phrased politely)
 - Defines what to exclude (operational/infrastructure, code-only, hypothesis falsification by designed test)
@@ -115,7 +116,7 @@ This file is the seam between stages. Users who don't want automated mining can 
 
 ### Goal
 
-For each finding, locate the **earliest point in the conversation** where enough evidence exists for a critic to raise the concern — *before* the Scientist noticed it.
+For each finding, locate the **earliest point in the conversation** where enough evidence exists for a critic to raise the concern — *before* the user noticed it.
 
 This stage also converts findings into proper hunches. The evidence agent writes the `smell` and `description`, because it has the full context needed (what the anomaly is, where the evidence is, how the dots connect). The nose mining stage only sees one window — it can say "something's wrong" but can't write a hunch that references evidence from hundreds of turns earlier.
 
@@ -172,7 +173,7 @@ Standard `hunch bank sync` discovers `.hunch/mined/*/hunches.jsonl` and processe
 - Creates new entries or links to existing ones
 - Auto-writes `label: "tp", labeled_by: "mined"` for each ingested hunch
 
-Mined hunches are, by construction, true positives: the Scientist actually noticed the concern, and the evidence mining confirmed it's detectable from the transcript.
+Mined hunches are, by construction, true positives: the user actually noticed the concern, and the evidence mining confirmed it's detectable from the transcript.
 
 ## Cost model
 
