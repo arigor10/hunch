@@ -36,6 +36,7 @@ exclude = ["tests*"]
 
 [tool.setuptools.package-data]
 "hunch.critic" = ["prompts/*.md"]
+"hunch.mine" = ["prompts/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

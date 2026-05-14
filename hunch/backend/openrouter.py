@@ -53,7 +53,8 @@ class OpenRouterBackend:
             base_url="https://openrouter.ai/api/v1",
         )
 
-    def call(self, prompt: str, cache_break: int | None = None) -> ModelResponse:
+    def call(self, prompt: str, cache_break: int | None = None,
+             suppress_cache_check: bool = False) -> ModelResponse:
         last_err: Exception | None = None
         backoff = self.initial_backoff_s
 
@@ -116,26 +117,12 @@ class OpenRouterBackend:
                         + (f" (attempt {attempt})" if attempt > 1 else "")
                     )
 
-                # Only enforce cache on first-attempt successes. Retries
-                # push elapsed time past the provider's cache TTL, so a
-                # miss after retries is expected, not a config problem.
-                if (self.require_cache
-                        and attempt == 1
-                        and self._call_count > self.cache_warmup_ticks
-                        and (input_tokens or 0) >= self.cache_min_tokens
-                        and (cached_tokens is None or cached_tokens == 0)):
-                    raise RuntimeError(
-                        f"Cache miss on call {self._call_count} "
-                        f"(prompt_tokens={input_tokens}, cached_tokens={cached_tokens}). "
-                        f"require_cache is on — aborting to avoid silent cost blowup. "
-                        f"Check provider cache TTL and tick interval."
-                    )
-
                 return ModelResponse(
                     text=text,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     cached_tokens=cached_tokens,
+                    cost_usd=float(cost) if cost is not None else None,
                 )
             except RuntimeError:
                 raise

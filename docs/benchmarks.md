@@ -1,6 +1,6 @@
 # Benchmarks
 
-**Status:** living document, last updated 2026-04-30
+**Status:** living document, last updated 2026-05-11
 
 Early benchmark results for Hunch components. These are not paper-ready — the datasets are small and drawn from a single project — but they establish baselines and guide iteration. Results will be updated as more labeled data accumulates.
 
@@ -44,67 +44,80 @@ Production uses `judge_dedup.md` (baseline prompt) with Haiku 4.5.
 - All pairs are from one project (`soft_prompting`). Cross-project generalization is untested.
 - The dedup judge in the bank sync pipeline operates within a bookmark window (±k ticks), so the eval slightly overstates difficulty — some non-duplicate pairs would never be compared in production.
 
-## Meeting-room vs raw transcript
+## Critic recall against mined ground truth
 
-**Question:** Does the meeting-room abstraction (compacted dialogue summaries) help the critic catch things that a raw-transcript critic misses?
+**Question:** What fraction of real scientific concerns does the critic actually catch?
 
-**Setup:** The `soft_prompting` project's Claude Code session (18K events, 39 compaction boundaries, 40 context windows) was processed two ways:
+### Ground truth construction
 
-1. **Meeting-room critic:** DeepSeek V4 Pro via the standard Hunch pipeline — sees a compacted meeting-room summary that accumulates across the full session. 240 ticks, 103 hunches emitted (after dedup+novelty filtering).
-2. **Raw-transcript critic:** DeepSeek V4 Pro given the full-resolution raw transcript, one chunk per compaction window. Each chunk is independent — no accumulated context. 40 chunks, 60 hunches emitted.
+We retrospectively mined ground-truth concerns from one project's full conversation history (~6,100 replay events across 79 sessions). The mining pipeline (see [mining_pipeline.md](mining_pipeline.md)) works in two stages:
 
-The raw hunches were deduped (sliding window of 10), novelty-filtered against their source chunks, then cross-matched against all 103 meeting-room hunches using the dedup judge.
+1. **Nose mining:** An LLM reads the conversation in overlapping segments and identifies moments where the Scientist explicitly flagged an anomaly — a contradictory result, a forgotten commitment, a questionable interpretation. This produced 108 nose moments.
+2. **Evidence mining:** For each nose moment, an agent searches backward through the full conversation to find the *earliest point* where enough evidence existed to catch the concern — before the Scientist noticed it. This produces a hunch with `evidence_tick_seqs` = the full evidence trail.
 
-### Raw-transcript pipeline
+The 108 mined hunches were ingested into the bank via `hunch bank sync`, which dedup-matched them against existing critic output. After dedup, they map to **102 unique bank concepts** (some mined hunches collapsed to the same concern). All are labeled tp (true positive by construction — the Scientist actually noticed each concern).
 
-| Stage | Count |
-|---|---|
-| Raw hunches emitted | 60 |
-| After intra-run dedup | 52 (-8 dups) |
-| After novelty filter | 39 (-13 already raised) |
+### Results
 
-### Cross-match results
+Four critic runs across two architectures and two models were evaluated:
 
-| Metric | Value |
-|---|---|
-| Raw-only (not in meeting-room) | 21 |
-| Meeting-room-only (not in raw) | 88 |
-| Cross-matches (overlap) | 18 |
-| Raw recall of meeting-room | 18/103 = 17.5% |
+| Run | Architecture | Model | Hunches emitted | Caught | Recall |
+|---|---|---|---|---|---|
+| Sonnet accumulator | accumulator v0.1 | Sonnet 4.5 | 126 | 20 | **19.6%** |
+| DeepSeek accumulator | accumulator v0.1 | DeepSeek V4 Pro | 175 | 14 | **13.7%** |
+| Sonnet wiki | wiki v1 | Sonnet 4.5 | 71 | 8 | **7.8%** |
+| **Sonnet combined** | both | Sonnet 4.5 | 197 | 24 | **23.5%** |
+| **All critics combined** | — | — | 372 | 29 | **28.4%** |
 
-The raw transcript critic recovers only 17.5% of the meeting-room critic's catches. The meeting-room catches 5x more unique concerns. Raw-only hunches tend to be local/operational (CUDA warnings, memory discrepancies, miscounts within a single chunk), while meeting-room-only hunches are long-range scientific tensions across experiments.
+The **accumulator v0.1** is a sliding-window critic that receives a compacted summary accumulated across the full session. Each tick appends new conversation to the summary and asks the model to identify anomalies. The **wiki v1** is an agentic critic that maintains a persistent structured knowledge base (wiki) across ticks, reading and writing entity files with tool use.
 
-### Cross-compaction citation analysis
+73 of 102 ground-truth concepts (72%) were missed by every critic.
 
-To quantify how far back the meeting-room critic reaches, we mapped each of the 103 meeting-room hunches' cited evidence (`triggering_refs.chunks`) back to the original Claude Code session's 40 compaction windows. A hunch "spans N compaction boundaries" if its earliest cited chunk is from a compaction window N windows before the trigger window.
+### Overlap between critics
 
-| Hunches citing across... | Count | % of 103 |
+| | Exclusive catches | Shared with others |
 |---|---|---|
-| >= 1 compaction boundary | 51 | 50% |
-| >= 2 compaction boundaries | 23 | 22% |
-| >= 5 compaction boundaries | 2 | 2% |
+| Sonnet accumulator | 9 | 11 |
+| DeepSeek accumulator | 5 | 9 |
+| Sonnet wiki | 3 | 5 |
 
-**50% of the meeting-room critic's hunches connect evidence across at least one Claude Code compaction boundary** — information that was compacted away from the original session and is only accessible through the accumulated meeting-room summary.
+The wiki adds 3 catches the accumulators missed, but its overall recall is the lowest. DeepSeek adds 5 unique catches despite lower overall recall than Sonnet — the two models catch partially different concerns.
 
-Additionally, 72/103 (70%) of hunches cite evidence from before their trigger window (even if within the same compaction window), meaning the accumulated timeline — not just the fresh chunks — is the primary evidence source.
+### Evidence accessibility analysis
 
-### Gap distribution (replay-buffer chunks before trigger window)
+Not all ground-truth concerns are structurally reachable by the critic at runtime. We analyzed two accessibility barriers:
 
-```
-gap= 0:  52 hunches (local only)
-gap= 1:  28
-gap= 2:  14
-gap= 3:   2
-gap= 4:   5
-gap= 6:   1
-gap= 7:   1
-```
+**Compaction boundaries.** Each session starts with a compacted summary of prior context. Evidence that predates the current session is only available through this lossy summary.
 
-The largest gap is 7 compaction boundaries: h-0167 ("exp_005b 'H4: Decisively refuted' contradicts exp_009 warm-start finding") connects evidence from compaction window 27 to window 34.
+| Evidence span | Findings | % of 108 |
+|---|---|---|
+| Within a single session | 8 | 7.4% |
+| Crosses session boundaries | 100 | 92.6% |
 
-### Caveats
+| Sessions spanned | Findings |
+|---|---|
+| 1 | 8 |
+| 2 | 30 |
+| 3 | 34 |
+| 4 | 20 |
+| 5+ | 16 |
 
-- Single project (`soft_prompting`), single model (DeepSeek V4 Pro). The meeting-room advantage may vary by project length and model.
-- Cross-match uses the dedup judge prompt, which was designed for same-run duplicates, not cross-run semantic matching. Some true overlaps may be missed.
-- The raw-transcript critic sees each chunk independently (no memory across chunks). A raw critic with sliding-window context would likely perform better, but would still lack the full-session accumulated view.
-- Compaction boundary mapping uses timestamps to correlate replay events to the original session. All 3,459 replay events matched (100%).
+92.6% of ground-truth concerns require connecting evidence across multiple sessions — information that the original LLM session had already compacted away. The median concern spans 3 sessions.
+
+**Accumulator window.** The accumulator maintains a rolling context window of ~140K tokens. Evidence that has been purged from this window is inaccessible regardless of compaction.
+
+| | Findings | % of 108 |
+|---|---|---|
+| All evidence fits in accumulator window | 80 | 74.1% |
+| Evidence falls outside window | 28 | 25.9% |
+
+74% of concerns have all evidence within the accumulator's window at signal time — the accumulator *could* see them. Its miss rate on these (~64%) reflects prompt and model limitations, not structural ones. The remaining 26% are structurally unreachable: the earliest evidence was already purged by the time the signal arrived.
+
+**Wiki-exclusive catches.** The 3 concerns caught only by the wiki (not by either accumulator) all had evidence that fit within the accumulator window. These are prompt/architecture wins — the wiki's persistent knowledge base and agentic reasoning found patterns the accumulator's single-pass prompt missed with the same information available.
+
+### Observations
+
+- **The recall ceiling is ~28%.** No combination of critics catches more than 29/102 concepts. The 73 missed concerns span the full project timeline and include deep architectural reasoning, mathematical mechanism gaps, and cross-experiment contradictions.
+- **Cross-session evidence is the norm.** 93% of ground-truth concerns require evidence from multiple sessions, making this the structural case for accumulated context: a critic with no memory across sessions would miss nearly everything.
+- **The gap is mostly capability, not structure.** 74% of concerns are within the accumulator's window, yet only ~25% of those are caught. Improving the prompt, model, or reasoning approach has more headroom than expanding the context window.
+- **Model diversity helps.** Sonnet and DeepSeek catch partially different subsets (only 8 shared catches out of 29 total). Ensembling across models improves coverage.

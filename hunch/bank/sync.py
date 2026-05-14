@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hunch.bank.reader import read_bank
-from hunch.bank.schema import LIVE_RUN_NAME, BankEntry, BankState
+from hunch.bank.schema import LIVE_RUN_NAME, MINED_RUN_PREFIX, BankEntry, BankState
 from hunch.bank.writer import BankWriter
 
 
@@ -139,6 +139,27 @@ def sync(
                 log=log,
             )
             result.runs.append(live_result)
+
+    # Mined hunches from .hunch/mined/*/
+    mined_dir = bank_dir.parent / "mined"
+    if mined_dir.is_dir():
+        mined_runs = _discover_mined_runs(mined_dir, run_name)
+        if mined_runs and log:
+            log(f"\nDiscovered {len(mined_runs)} mined run(s) in {mined_dir}")
+        for mined_run_name, mined_hunches_path in mined_runs:
+            if log:
+                log(f"\nProcessing mined run: {mined_run_name}")
+            mined_result = _sync_mined_run(
+                mined_run_name=mined_run_name,
+                mined_hunches_path=mined_hunches_path,
+                bank_path=bank_path,
+                runs_dir=runs_dir,
+                judge_fn=judge_fn,
+                window_k=window_k,
+                max_workers=max_workers,
+                log=log,
+            )
+            result.runs.append(mined_result)
 
     return result
 
@@ -436,6 +457,128 @@ def _current_feedback_label(entry: BankEntry, hunch_id: str) -> str | None:
             best_ts = lr.ts
             best_label = lr.label
     return best_label
+
+
+# ---------------------------------------------------------------------------
+# Mined run sync
+# ---------------------------------------------------------------------------
+
+
+def _discover_mined_runs(
+    mined_dir: Path,
+    run_name: str | None,
+) -> list[tuple[str, Path]]:
+    """Find mined dirs matching <mined_dir>/*/hunches.jsonl.
+
+    Returns (run_name, path) pairs. Run names are prefixed with
+    ':mined:' to prevent collision with eval run names.
+    """
+    runs = []
+    for child in sorted(mined_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        hunches_path = child / "hunches.jsonl"
+        if not hunches_path.exists():
+            continue
+        rname = f"{MINED_RUN_PREFIX}{child.name}"
+        if run_name is not None and rname != run_name:
+            continue
+        runs.append((rname, hunches_path))
+    return runs
+
+
+def _sync_mined_run(
+    mined_run_name: str,
+    mined_hunches_path: Path,
+    bank_path: Path,
+    runs_dir: Path,
+    judge_fn: JudgeFn,
+    window_k: int,
+    max_workers: int,
+    log: Callable[[str], None] | None,
+) -> RunSyncResult:
+    """Sync mined hunches into the bank.
+
+    Like eval runs: copies hunches.jsonl into bank/runs/, dedup-matches,
+    and auto-labels all mined hunches as tp.
+    """
+    bank_copy_dir = runs_dir / mined_run_name
+    bank_copy_path = bank_copy_dir / "hunches.jsonl"
+
+    if bank_copy_path.exists():
+        conflict = _check_conflict(mined_hunches_path, bank_copy_path)
+        if conflict:
+            if log:
+                log(f"  CONFLICT: {conflict}")
+            return RunSyncResult(
+                run_name=mined_run_name,
+                status="skipped_conflict",
+                conflict_detail=conflict,
+            )
+    else:
+        bank_copy_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(mined_hunches_path, bank_copy_path)
+
+    eval_hunches = _load_emitted_hunches(mined_hunches_path)
+    if not eval_hunches:
+        if log:
+            log(f"  No emitted hunches found")
+        return RunSyncResult(
+            run_name=mined_run_name, status="skipped_up_to_date",
+        )
+
+    state = read_bank(bank_path)
+    already_ingested = _already_ingested_ids(state, mined_run_name)
+    new_hunches = [
+        h for h in eval_hunches if h["hunch_id"] not in already_ingested
+    ]
+
+    if not new_hunches:
+        return RunSyncResult(
+            run_name=mined_run_name, status="skipped_up_to_date",
+        )
+
+    if log:
+        log(f"  {len(new_hunches)} new hunches to process "
+            f"({len(already_ingested)} already ingested)")
+
+    status = "resumed" if already_ingested else "ingested"
+    run_result = _ingest_hunches(
+        rname=mined_run_name,
+        new_hunches=new_hunches,
+        state=state,
+        bank_path=bank_path,
+        judge_fn=judge_fn,
+        window_k=window_k,
+        max_workers=max_workers,
+        log=log,
+    )
+    run_result.status = status
+
+    # Auto-label all mined hunches as tp
+    state = read_bank(bank_path)
+    writer = BankWriter(bank_path)
+    labels_written = 0
+    for nh in new_hunches:
+        hid = nh["hunch_id"]
+        bank_id = state.hunch_to_bank.get((mined_run_name, hid))
+        if bank_id is None:
+            continue
+        writer.write_label(
+            bank_id=bank_id,
+            run=mined_run_name,
+            hunch_id=hid,
+            label="tp",
+            ts=_now_ts(),
+            labeled_by="mined",
+        )
+        labels_written += 1
+
+    run_result.labels_migrated = labels_written
+    if log and labels_written:
+        log(f"  Auto-labeled {labels_written} mined hunches as tp")
+
+    return run_result
 
 
 # ---------------------------------------------------------------------------

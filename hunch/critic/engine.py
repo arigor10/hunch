@@ -128,6 +128,7 @@ class CriticEngine(Critic):
     )
     _initialized: bool = field(default=False, init=False, repr=False)
     _consecutive_failures: int = field(default=0, init=False, repr=False)
+    _consecutive_cache_misses: int = field(default=0, init=False, repr=False)
     _total_input_tokens: int = field(default=0, init=False, repr=False)
     _total_output_tokens: int = field(default=0, init=False, repr=False)
     _total_cached_tokens: int = field(default=0, init=False, repr=False)
@@ -203,12 +204,16 @@ class CriticEngine(Critic):
             return []
 
         cache_break = self._prev_prompt_len or None
+        # After a purge the prompt is restructured — the first call
+        # will always be a full cache miss, so suppress require_cache.
+        suppress_cache_check = purged > 0
         last_error: Exception | None = None
 
         for attempt in range(1, self.config.max_consecutive_failures + 1):
             try:
                 response: ModelResponse = self.backend.call(
                     prompt, cache_break=cache_break,
+                    suppress_cache_check=suppress_cache_check,
                 )
             except Exception as e:
                 last_error = e
@@ -257,6 +262,24 @@ class CriticEngine(Critic):
                 continue
 
             self._consecutive_failures = 0
+
+            # Track consecutive cache misses (halt on systemic problem).
+            if (not suppress_cache_check
+                    and self._total_calls > 2
+                    and (input_tokens or 0) > 0
+                    and (response.cached_tokens or 0) == 0):
+                self._consecutive_cache_misses += 1
+                self._log(
+                    f"[critic] cache miss ({self._consecutive_cache_misses} consecutive)"
+                )
+                if self._consecutive_cache_misses >= 3:
+                    raise RuntimeError(
+                        f"3 consecutive cache misses — halting to avoid "
+                        f"silent cost blowup. Check provider cache TTL."
+                    )
+            else:
+                self._consecutive_cache_misses = 0
+
             if not hunches:
                 self._log("[critic] (no hunches this tick)")
             return hunches

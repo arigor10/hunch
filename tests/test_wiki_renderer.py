@@ -75,7 +75,7 @@ def test_render_user_text(replay_dir):
         {"tick_seq": 5, "type": "user_text", "timestamp": "2026-01-01T10:00:00Z", "text": "Let's try layer 14"},
     ]
     block = render_current_block(events, "t-0003", 4, 5, replay_dir / "artifacts")
-    assert "**USER:** Let's try layer 14" in block
+    assert "**USER** (seq 5): Let's try layer 14" in block
     assert "t-0003" in block
     assert "Replay turns 5-5" in block
 
@@ -85,7 +85,7 @@ def test_render_assistant_text(replay_dir):
         {"tick_seq": 6, "type": "assistant_text", "timestamp": "2026-01-01T10:01:00Z", "text": "Running experiment..."},
     ]
     block = render_current_block(events, "t-0004", 5, 6, replay_dir / "artifacts")
-    assert "**CLAUDE:** Running experiment..." in block
+    assert "**CLAUDE** (seq 6): Running experiment..." in block
 
 
 def test_render_artifact_write(replay_dir):
@@ -100,7 +100,7 @@ def test_render_artifact_write(replay_dir):
         },
     ]
     block = render_current_block(events, "t-0005", 6, 7, replay_dir / "artifacts")
-    assert "[ARTIFACT WRITE: results/exp.md]" in block
+    assert "[ARTIFACT WRITE] (seq 7): results/exp.md" in block
     assert "Rotation at 311 degrees" in block
     assert "[Content (33 chars):]" in block
 
@@ -134,7 +134,7 @@ def test_render_artifact_edit(replay_dir):
         },
     ]
     block = render_current_block(events, "t-0007", 8, 9, replay_dir / "artifacts")
-    assert "[ARTIFACT EDIT: docs/plan.md]" in block
+    assert "[ARTIFACT EDIT] (seq 9): docs/plan.md" in block
     assert "[Changed: 'step 1' -> 'step 1 (done)']" in block
 
 
@@ -149,7 +149,7 @@ def test_render_artifact_edit_skipped(replay_dir):
         },
     ]
     block = render_current_block(events, "t-0008", 9, 10, replay_dir / "artifacts")
-    assert "[ARTIFACT EDIT (skipped: edit_before_known_base): docs/plan.md]" in block
+    assert "[ARTIFACT EDIT (skipped: edit_before_known_base)] (seq 10): docs/plan.md" in block
 
 
 def test_render_tool_error(replay_dir):
@@ -162,7 +162,7 @@ def test_render_tool_error(replay_dir):
         },
     ]
     block = render_current_block(events, "t-0009", 10, 11, replay_dir / "artifacts")
-    assert "[TOOL ERROR (Bash): command not found]" in block
+    assert "[TOOL ERROR (Bash)] (seq 11): command not found" in block
 
 
 def test_render_empty_block(replay_dir):
@@ -187,10 +187,10 @@ def test_render_mixed_block(replay_dir):
         },
     ]
     block = render_current_block(events, "t-0001", 0, 4, replay_dir / "artifacts")
-    assert "**USER:** Do it" in block
-    assert "**CLAUDE:** On it" in block
-    assert "[ARTIFACT WRITE: out.md]" in block
-    assert "[ARTIFACT EDIT: out.md]" in block
+    assert "**USER** (seq 1): Do it" in block
+    assert "**CLAUDE** (seq 2): On it" in block
+    assert "[ARTIFACT WRITE] (seq 3): out.md" in block
+    assert "[ARTIFACT EDIT] (seq 4): out.md" in block
     assert "Replay turns 1-4" in block
 
 

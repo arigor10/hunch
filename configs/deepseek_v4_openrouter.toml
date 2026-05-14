@@ -6,14 +6,14 @@ model = "deepseek/deepseek-v4-pro"
 env_var = "OPENROUTER_API_KEY"
 
 [backend.params]
-max_tokens = 8192
+max_tokens = 16384
 temperature = 0.0
 timeout_s = 600
 max_retries = 5
 initial_backoff_s = 5.0
 require_cache = true
 cache_warmup_ticks = 2
-provider_order = ["SiliconFlow"]
+provider_order = ["GMICloud"]
 
 [engine]
 low_watermark = 140000

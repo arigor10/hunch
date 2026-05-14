@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 LIVE_RUN_NAME = ":live"
+MINED_RUN_PREFIX = ":mined:"
 
 
 @dataclass

@@ -68,13 +68,12 @@ class TestClaudeCliBackend:
         assert resp.text == "text only"
         assert resp.input_tokens is None
 
-    def test_non_json_stdout(self, monkeypatch):
+    def test_non_json_stdout_raises(self, monkeypatch):
         monkeypatch.setattr(subprocess, "run",
                             lambda cmd, **kw: FakeCompletedProcess(stdout="raw text"))
 
-        resp = ClaudeCliBackend().call("p")
-        assert resp.text == "raw text"
-        assert resp.input_tokens is None
+        with pytest.raises(RuntimeError, match="non-JSON output"):
+            ClaudeCliBackend().call("p")
 
     def test_nonzero_exit(self, monkeypatch):
         monkeypatch.setattr(subprocess, "run",

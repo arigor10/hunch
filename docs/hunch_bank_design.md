@@ -121,7 +121,7 @@ Written at ingest when a hunch has no match in the existing bank.
 - `bank_id`: monotonic `hb-NNNN`, allocated at ingest (scan file for max ID on startup).
 - `canonical_smell` / `canonical_description`: the first occurrence's wording, never mutated.
 - `source_run` / `source_hunch_id`: which run's hunch became the canonical entry.
-- `bookmark_now`: replay-buffer position where the hunch was emitted. Used for windowed dedup matching at sync time.
+- `bookmark_now`: replay-buffer `tick_seq` (conversation event index) where the hunch was emitted. Used for windowed dedup matching at sync time.
 
 ### `link` — duplicate hunch mapped to an existing bank entry
 
@@ -413,7 +413,7 @@ For each discovered run:
 
 **Why not full comparison:** At 150 bank × 100 new = 15,000 calls, full comparison is 10× more expensive for marginal recall improvement. The windowed approach catches duplicates that occur near the same point in the transcript, which covers the vast majority of cases (same concern triggered by the same evidence).
 
-**bookmark_now on events:** Both `entry` and `link` events carry a `bookmark_now` field recording the replay-buffer position where the hunch was emitted. This enables the windowed comparison.
+**bookmark_now on events:** Both `entry` and `link` events carry a `bookmark_now` field recording the replay-buffer `tick_seq` (conversation event index) where the hunch was emitted. This enables the windowed comparison.
 
 **Result processing:** After all comparisons, each new hunch has zero or more matches. If matched to one or more bank entries, link to the highest-scoring match. If unmatched, create a new entry.
 
@@ -482,6 +482,84 @@ Live feedback labels use `labeled_by: "operational_live"`, which is tier 2 (weak
 
 This reflects the reality that pressing "good" in the TUI is a quick in-the-moment reaction, while retrospective annotation is a deliberate judgment.
 
+## Mined hunches
+
+Mined hunches are ground-truth concerns extracted from historical transcripts by an agent-assisted pipeline. They represent moments where the Scientist noticed an anomaly during a session — the mining pipeline locates *where evidence first appeared* so that the hunch has proper `bookmark_prev`/`bookmark_now` values pointing to the earliest raisable moment, not where the Scientist eventually raised the issue.
+
+### Disk layout
+
+```
+<project>/.hunch/mined/
+  <run_name>/
+    hunches.jsonl         # emit events with source: "mined"
+```
+
+The run name identifies the mining method or batch — e.g. `nose_v2_full`, `nose_v3_longrange`, `evidence_pilot_01`. Same convention as eval runs under `.hunch/eval/<run_name>/`.
+
+Mined hunches live outside both `replay/` (live) and `eval/` (critic output). They are a distinct provenance: human-verified concerns with agent-located evidence, not critic-generated catches.
+
+### Schema
+
+Mined hunches use standard `type: "emit"` events with two additional fields:
+
+```json
+{
+  "type": "emit",
+  "hunch_id": "h-0001",
+  "ts": "2026-05-05T12:00:00Z",
+  "emitted_by_tick": -1,
+  "bookmark_prev": 156,
+  "bookmark_now": 157,
+  "smell": "Capacity sweep planned, cancelled, never reinstated",
+  "description": "k ∈ {32, 64, 128} sweep was planned in exp_004...",
+  "triggering_refs": {
+    "tick_seqs": [143, 145, 152, 157],
+    "artifacts": ["docs/exp_004_plan.md"]
+  },
+  "source": "mined",
+  "source_finding_id": "NF-064"
+}
+```
+
+- `emitted_by_tick: -1` — sentinel for "not produced by a critic tick."
+- `source: "mined"` — provenance marker distinguishing these from critic-generated hunches.
+- `source_finding_id` — traceability back to the nose-moment finding that originated this hunch.
+- `bookmark_now` — the `earliest_raisable` tick_seq: the point where a critic could first fire this concern. Used by bank sync for windowed dedup positioning.
+- `bookmark_prev` — `bookmark_now - 1`. Kept minimal because the evidence trail (which may span hundreds of turns) lives in `triggering_refs.tick_seqs`, not in the bookmark window.
+- `triggering_refs.tick_seqs` — specific conversation events that constitute the evidence.
+
+### Pipeline stages
+
+```
+nose mining  →  evidence mining (+ detectability)  →  emit generation  →  bank sync
+```
+
+See [mining_pipeline.md](mining_pipeline.md) for the full algorithm, prompt design principles, and cost model.
+
+### Bank sync discovery
+
+Sync discovers mined hunches at `<bank_dir>/../mined/*/hunches.jsonl`. Each subdirectory name becomes the run name (prefixed with `:mined:` to prevent collision with eval run names — e.g. `:mined:nose_v2_full`). Like eval runs, mined hunches are **copied** into `bank/runs/:mined:<run_name>/hunches.jsonl` at ingest — the mined directory is a derived artifact that may be deleted or re-generated, and the bank needs a stable copy to resolve `(run, hunch_id)` references. (Live hunches are the one exception: the replay buffer is append-only and canonical, so copying would be pure redundancy.)
+
+### Label semantics
+
+When mined hunches are synced to the bank, a `label` event is auto-written:
+
+```json
+{
+  "type": "label",
+  "bank_id": "hb-0042",
+  "run": ":mined:nose_v2_full",
+  "hunch_id": "h-0001",
+  "label": "tp",
+  "labeled_by": "mined",
+  "category": "",
+  "ts": "2026-05-05T12:00:01Z"
+}
+```
+
+All mined hunches are labeled `tp` — they are, by construction, concerns that the Scientist actually noticed and that the detectability filter confirmed could have been caught from the transcript. The `mined` tier sits in tier 1 (deliberate), so these labels propagate to future critic-generated hunches that match the same bank entry.
+
 ## Open questions (deferred)
 
 - **Annotation tool integration.** How does `annotate_web.py` read/write the bank? What changes to the UI for inherited labels?
+- **Incremental re-sync after run growth.** If a previously-ingested run grows (eval resumed after dataset grew, or mining run extended), the current conflict check rejects the entire run because the file changed. The safe case — the bank's copy is a prefix of the current file (append-only growth) — should be detected and handled: update the copy, process only new hunch IDs, preserve existing entries/links/labels. Non-prefix changes (hunches modified or removed) remain a real conflict. Same issue applies to mined runs.

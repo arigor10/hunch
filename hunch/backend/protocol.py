@@ -13,6 +13,7 @@ class ModelResponse:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cached_tokens: int | None = None
+    cost_usd: float | None = None
 
 
 class Backend(Protocol):
@@ -26,4 +27,9 @@ class Backend(Protocol):
     from this index onward is new content. Backends that support
     explicit cache_control use this to split the prompt.
     """
-    def call(self, prompt: str, cache_break: int | None = None) -> ModelResponse: ...
+    def call(
+        self,
+        prompt: str,
+        cache_break: int | None = None,
+        suppress_cache_check: bool = False,
+    ) -> ModelResponse: ...

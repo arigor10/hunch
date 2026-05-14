@@ -19,7 +19,8 @@ class ClaudeCliBackend:
     model: str = "claude-sonnet-4-5-20250929"
     timeout_s: float = 600.0
 
-    def call(self, prompt: str, cache_break: int | None = None) -> ModelResponse:
+    def call(self, prompt: str, cache_break: int | None = None,
+             suppress_cache_check: bool = False) -> ModelResponse:
         result = subprocess.run(
             [
                 "claude",
@@ -40,10 +41,16 @@ class ClaudeCliBackend:
             )
         try:
             envelope = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            return ModelResponse(text=result.stdout, input_tokens=None)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"claude CLI returned non-JSON output: {exc}\n"
+                f"stdout (last 400 chars): {result.stdout[-400:]}"
+            )
 
         text = envelope.get("result", "")
+        cost_usd = envelope.get("total_cost_usd")
+        if cost_usd is not None:
+            cost_usd = float(cost_usd)
         usage = envelope.get("usage") or {}
         input_tokens: int | None = None
         output_tokens: int | None = None
@@ -60,4 +67,5 @@ class ClaudeCliBackend:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_tokens=cached_tokens,
+            cost_usd=cost_usd,
         )

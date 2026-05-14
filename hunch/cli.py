@@ -321,6 +321,89 @@ def _build_parser() -> argparse.ArgumentParser:
         help="model for dedup judge (default: claude-haiku-4-5-20251001)",
     )
 
+    mine = sub.add_parser("mine", help="mine ground-truth hunches from conversations")
+    mine_sub = mine.add_subparsers(dest="mine_command", metavar="<command>")
+
+    mine_nose = mine_sub.add_parser(
+        "nose",
+        help="find moments where the Scientist's nose fired",
+    )
+    mine_nose.add_argument(
+        "--replay-dir",
+        type=Path,
+        default=None,
+        help="replay-buffer directory (default: .hunch/replay/ under cwd)",
+    )
+    mine_nose.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="directory for mining output (findings.jsonl)",
+    )
+    mine_nose.add_argument(
+        "--model",
+        default="claude-sonnet-4-5-20250929",
+        help="model for nose mining (default: claude-sonnet-4-5-20250929)",
+    )
+    mine_nose.add_argument(
+        "--window-size",
+        type=int,
+        default=200,
+        help="events per chunk window (default: 200)",
+    )
+    mine_nose.add_argument(
+        "--overlap",
+        type=int,
+        default=50,
+        help="overlap between chunk windows (default: 50)",
+    )
+    mine_nose.add_argument(
+        "--prompt",
+        type=Path,
+        default=None,
+        help="custom mining prompt (default: bundled)",
+    )
+
+    mine_ev = mine_sub.add_parser(
+        "evidence",
+        help="locate earliest evidence for each finding and emit hunches",
+    )
+    mine_ev.add_argument(
+        "--replay-dir",
+        type=Path,
+        default=None,
+        help="replay-buffer directory (default: .hunch/replay/ under cwd)",
+    )
+    mine_ev.add_argument(
+        "--findings",
+        type=Path,
+        required=True,
+        help="findings.jsonl from nose mining (or hand-written)",
+    )
+    mine_ev.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="directory for mining output (hunches.jsonl)",
+    )
+    mine_ev.add_argument(
+        "--model",
+        default="claude-sonnet-4-5-20250929",
+        help="model for evidence mining agent (default: claude-sonnet-4-5-20250929)",
+    )
+    mine_ev.add_argument(
+        "--timeout",
+        type=float,
+        default=600.0,
+        help="agent timeout in seconds (default: 600)",
+    )
+    mine_ev.add_argument(
+        "--prompt",
+        type=Path,
+        default=None,
+        help="custom evidence prompt (default: bundled)",
+    )
+
     hook = sub.add_parser("hook", help="Claude Code hook handlers (internal)")
     hook_sub = hook.add_subparsers(dest="hook_name", metavar="<hook>")
     ups = hook_sub.add_parser(
@@ -413,6 +496,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_filter(ns)
     if ns.command == "bank":
         return _cmd_bank(ns)
+    if ns.command == "mine":
+        return _cmd_mine(ns)
     if ns.command == "init":
         return _cmd_init(ns)
     if ns.command == "status":
@@ -492,6 +577,8 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
     if tick_interval == 0.0 and ns.config is not None:
         from hunch.backend.config import load_config as _load_config
         tick_interval = _load_config(ns.config).engine.min_tick_interval_s
+
+    _save_run_metadata(ns, output_dir, critic_label)
 
     t0 = _time.monotonic()
     try:
@@ -804,6 +891,115 @@ def _atomic_rewrite_jsonl(path: Path, entries: list[dict | None]) -> None:
         raise
 
 
+def _require_claude_cli() -> bool:
+    """Check that the claude CLI is available. Returns True if found."""
+    import shutil
+    if shutil.which("claude") is None:
+        sys.stderr.write(
+            "hunch mine: 'claude' CLI not found in PATH.\n"
+            "Install Claude Code: https://docs.anthropic.com/en/docs/claude-code\n"
+        )
+        return False
+    return True
+
+
+def _cmd_mine(ns: argparse.Namespace) -> int:
+    if ns.mine_command == "nose":
+        return _cmd_mine_nose(ns)
+    if ns.mine_command == "evidence":
+        return _cmd_mine_evidence(ns)
+    sys.stderr.write("hunch mine: specify a subcommand (nose, evidence)\n")
+    return 2
+
+
+def _cmd_mine_nose(ns: argparse.Namespace) -> int:
+    if not _require_claude_cli():
+        return 1
+
+    from hunch.mine.nose import NoseConfig, run_nose_mining
+
+    replay_dir = _resolved_replay_dir(ns.replay_dir)
+    output_dir = ns.output_dir.resolve()
+
+    def _log(msg: str) -> None:
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+
+    config = NoseConfig(
+        model=ns.model,
+        window_size=ns.window_size,
+        overlap=ns.overlap,
+        prompt_path=ns.prompt,
+    )
+
+    _log(f"hunch mine nose: {replay_dir}")
+    _log(f"  output → {output_dir}")
+    _log(f"  model={config.model}  window={config.window_size}  overlap={config.overlap}")
+
+    try:
+        result = run_nose_mining(
+            replay_dir=replay_dir,
+            output_dir=output_dir,
+            config=config,
+            on_log=_log,
+        )
+    except (FileNotFoundError, RuntimeError) as e:
+        sys.stderr.write(f"hunch mine nose: {e}\n")
+        return 1
+
+    _log(
+        f"\nSummary: {result.total_findings} findings, "
+        f"{result.total_chunks} chunks, "
+        f"{result.errors} errors, "
+        f"${result.total_cost_usd:.3f}"
+    )
+    return 0
+
+
+def _cmd_mine_evidence(ns: argparse.Namespace) -> int:
+    if not _require_claude_cli():
+        return 1
+
+    from hunch.mine.evidence import EvidenceConfig, run_evidence_mining
+
+    replay_dir = _resolved_replay_dir(ns.replay_dir)
+    output_dir = ns.output_dir.resolve()
+
+    def _log(msg: str) -> None:
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+
+    config = EvidenceConfig(
+        model=ns.model,
+        prompt_path=ns.prompt,
+        timeout_s=ns.timeout,
+    )
+
+    _log(f"hunch mine evidence: {replay_dir}")
+    _log(f"  findings → {ns.findings}")
+    _log(f"  output → {output_dir}")
+    _log(f"  model={config.model}  timeout={config.timeout_s}s")
+
+    try:
+        result = run_evidence_mining(
+            replay_dir=replay_dir,
+            findings_path=ns.findings.resolve(),
+            output_dir=output_dir,
+            config=config,
+            on_log=_log,
+        )
+    except (FileNotFoundError, RuntimeError) as e:
+        sys.stderr.write(f"hunch mine evidence: {e}\n")
+        return 1
+
+    _log(
+        f"\nSummary: {result.total_processed} processed, "
+        f"{result.total_errors} errors, "
+        f"${result.total_cost_usd:.3f}"
+    )
+    return 0
+
+
 def _cmd_bank(ns: argparse.Namespace) -> int:
     if ns.bank_command == "sync":
         return _cmd_bank_sync(ns)
@@ -882,6 +1078,60 @@ def _try_anthropic_client():
         return anthropic.Anthropic()
     except Exception:
         return None
+
+
+def _save_run_metadata(ns: argparse.Namespace, output_dir: Path, critic_label: str) -> None:
+    """Save run parameters and git info to run_metadata.json in the output dir."""
+    import json
+    import subprocess
+    from datetime import datetime, timezone
+
+    meta_path = output_dir / "run_metadata.json"
+    if meta_path.exists():
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    git_rev = ""
+    git_dirty = False
+    try:
+        git_rev = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=Path(__file__).parent,
+        ).stdout.strip()
+        git_dirty = subprocess.run(
+            ["git", "diff", "--quiet"],
+            capture_output=True, timeout=5,
+            cwd=Path(__file__).parent,
+        ).returncode != 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    args_dict = {}
+    for k, v in vars(ns).items():
+        if k == "func":
+            continue
+        if isinstance(v, Path):
+            args_dict[k] = str(v)
+        elif isinstance(v, list) and v and isinstance(v[0], Path):
+            args_dict[k] = [str(p) for p in v]
+        else:
+            args_dict[k] = v
+
+    metadata = {
+        "command": "replay-offline",
+        "critic_label": critic_label,
+        "args": args_dict,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "hunch_version": __version__,
+        "git_rev": git_rev,
+        "git_dirty": git_dirty,
+    }
+
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
 
 def _critic_label(ns: argparse.Namespace) -> str:
