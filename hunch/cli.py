@@ -426,6 +426,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="replay-buffer directory (default: .hunch/replay/ under cwd)",
     )
+    stop_delivery = hook_sub.add_parser(
+        "stop-delivery",
+        help="Async Stop hook — poll for approved hunches and deliver via rewake",
+    )
+    stop_delivery.add_argument(
+        "--replay-dir",
+        type=Path,
+        default=None,
+        help="replay-buffer directory (default: .hunch/replay/ under cwd)",
+    )
 
     return p
 
@@ -1319,6 +1329,12 @@ def _cmd_hook(ns: argparse.Namespace) -> int:
         if ns.replay_dir is not None:
             argv.extend(["--replay-dir", str(ns.replay_dir)])
         return stop_main(argv)
+    if ns.hook_name == "stop-delivery":
+        from hunch.hook.stop_delivery import main as sd_main
+        argv = []
+        if ns.replay_dir is not None:
+            argv.extend(["--replay-dir", str(ns.replay_dir)])
+        return sd_main(argv)
     sys.stderr.write(f"hunch hook: unknown hook '{ns.hook_name}'\n")
     return 2
 

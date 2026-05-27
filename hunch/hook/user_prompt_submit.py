@@ -56,13 +56,16 @@ class HookResult:
 # Formatting
 # ---------------------------------------------------------------------------
 
-def _format_additional_context(hunches: list[HunchRecord]) -> str:
+def format_hunch_injection(hunches: list[HunchRecord]) -> str:
     """Render pending hunches as injected context.
 
     The framing matters: the Researcher is an instruction-follower.
     If we write "INVESTIGATE THIS", it will drop everything. If we
     write "a colleague observed", it reads as information, not
     command. See critic_v0.md §Output schema rationale.
+
+    Shared by both the UserPromptSubmit hook (additionalContext) and
+    the stop-delivery hook (asyncRewake stderr).
     """
     lines = [
         "<hunch-injection>",
@@ -118,7 +121,7 @@ def handle_user_prompt_submit(
         if not approved:
             return _empty_continue()
 
-        context = _format_additional_context(approved)
+        context = format_hunch_injection(approved)
 
         ts = now_iso or _utc_now_iso()
         writer = HunchesWriter(hunches_path=hunches_path)
