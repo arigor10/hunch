@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hunch.journal.feedback import read_labeled_hunch_ids
+from hunch.journal.feedback import read_hunch_edits, read_labeled_hunch_ids
 from hunch.journal.hunches import HunchRecord, HunchesWriter, read_current_hunches
 
 
@@ -56,7 +56,10 @@ class HookResult:
 # Formatting
 # ---------------------------------------------------------------------------
 
-def format_hunch_injection(hunches: list[HunchRecord]) -> str:
+def format_hunch_injection(
+    hunches: list[HunchRecord],
+    edits: dict[str, Any] | None = None,
+) -> str:
     """Render pending hunches as injected context.
 
     The framing matters: the Researcher is an instruction-follower.
@@ -64,9 +67,13 @@ def format_hunch_injection(hunches: list[HunchRecord]) -> str:
     write "a colleague observed", it reads as information, not
     command. See critic_v0.md §Output schema rationale.
 
+    If `edits` is provided, edited smell/description override the
+    original for any hunch that was edited before approval.
+
     Shared by both the UserPromptSubmit hook (additionalContext) and
     the stop-delivery hook (asyncRewake stderr).
     """
+    edits = edits or {}
     lines = [
         "<hunch-injection>",
         "A meeting-room colleague (Hunch) has been watching this work "
@@ -78,9 +85,12 @@ def format_hunch_injection(hunches: list[HunchRecord]) -> str:
         "",
     ]
     for h in hunches:
-        lines.append(f"- [{h.hunch_id}] {h.smell}")
-        if h.description:
-            lines.append(f"    {h.description}")
+        edit = edits.get(h.hunch_id)
+        smell = edit.edited_smell if edit else h.smell
+        description = edit.edited_description if edit else h.description
+        lines.append(f"- [{h.hunch_id}] {smell}")
+        if description:
+            lines.append(f"    {description}")
     lines.append("</hunch-injection>")
     return "\n".join(lines)
 
@@ -121,7 +131,8 @@ def handle_user_prompt_submit(
         if not approved:
             return _empty_continue()
 
-        context = format_hunch_injection(approved)
+        edits = read_hunch_edits(replay_dir / "feedback.jsonl")
+        context = format_hunch_injection(approved, edits=edits)
 
         ts = now_iso or _utc_now_iso()
         writer = HunchesWriter(hunches_path=hunches_path)

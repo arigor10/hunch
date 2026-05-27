@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 
 from hunch.hook.user_prompt_submit import format_hunch_injection
-from hunch.journal.feedback import read_labeled_hunch_ids
+from hunch.journal.feedback import read_hunch_edits, read_labeled_hunch_ids
 from hunch.journal.hunches import HunchesWriter, read_current_hunches
 
 POLL_INTERVAL_S = 5.0
@@ -88,7 +88,8 @@ def _poll_loop(replay_dir: Path, poll_interval: float, max_wait: float) -> int:
 
         if deliverable:
             _mark_surfaced(replay_dir, deliverable)
-            injection = format_hunch_injection(deliverable)
+            edits = read_hunch_edits(replay_dir / "feedback.jsonl")
+            injection = format_hunch_injection(deliverable, edits=edits)
             print(injection, file=sys.stderr)
             return 2
 

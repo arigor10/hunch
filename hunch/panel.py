@@ -30,11 +30,16 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hunch.journal.feedback import FeedbackWriter, read_labeled_hunch_ids
+from hunch.journal.feedback import (
+    FeedbackWriter,
+    HunchEdit,
+    read_hunch_edits,
+    read_labeled_hunch_ids,
+)
 from hunch.journal.hunches import HunchRecord, read_current_hunches
 
 
@@ -64,6 +69,7 @@ class PanelSnapshot:
     """One poll's view of the replay buffer, merged for display."""
     records: list[HunchRecord]
     labels: dict[str, str]
+    edits: dict[str, HunchEdit] = field(default_factory=dict)
     max_tick_seq: int = 0
 
     def display_status_for(self, hunch_id: str, record: HunchRecord) -> str:
@@ -112,10 +118,12 @@ def read_max_tick_seq(conversation_path: Path) -> int:
 
 def read_snapshot(replay_dir: Path) -> PanelSnapshot:
     """Read a consistent view of hunches + feedback from disk."""
+    feedback_path = replay_dir / "feedback.jsonl"
     records = read_current_hunches(replay_dir / "hunches.jsonl")
-    labels = read_labeled_hunch_ids(replay_dir / "feedback.jsonl")
+    labels = read_labeled_hunch_ids(feedback_path)
+    edits = read_hunch_edits(feedback_path)
     max_seq = read_max_tick_seq(replay_dir / "conversation.jsonl")
-    return PanelSnapshot(records=records, labels=labels, max_tick_seq=max_seq)
+    return PanelSnapshot(records=records, labels=labels, edits=edits, max_tick_seq=max_seq)
 
 
 # ---------------------------------------------------------------------------
@@ -129,11 +137,13 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
         from textual.binding import Binding
         from textual.containers import Vertical
         from textual.reactive import reactive
+        from textual.screen import ModalScreen
         from textual.widgets import (
             DataTable,
             Footer,
             Header,
             Static,
+            TextArea,
         )
     except ImportError as e:
         import sys
@@ -142,6 +152,65 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             "Install with: pipx inject hunch textual\n"
         )
         return 1
+
+    _EDIT_SEPARATOR = "\n---\n"
+
+    class EditScreen(ModalScreen[str | None]):
+        """Modal editor for hunch smell + description.
+
+        Pre-populated with: smell + separator + description.
+        Returns the edited text on Ctrl+S, or None on Escape.
+        """
+
+        CSS = """
+        EditScreen {
+            align: center middle;
+        }
+        #edit-container {
+            width: 90%;
+            height: 80%;
+            background: $surface;
+            border: solid $accent;
+            padding: 1;
+        }
+        #edit-hint {
+            height: 1;
+            padding: 0 1;
+            background: $boost;
+        }
+        #edit-area {
+            height: 1fr;
+        }
+        """
+
+        BINDINGS = [
+            Binding("escape", "cancel", "Cancel", priority=True),
+            Binding("ctrl+s", "save", "Save", priority=True),
+        ]
+
+        def __init__(self, hunch_id: str, smell: str, description: str) -> None:
+            super().__init__()
+            self.hunch_id = hunch_id
+            self.initial_text = f"{smell}{_EDIT_SEPARATOR}{description}"
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="edit-container"):
+                yield Static(
+                    f"Editing [b]{self.hunch_id}[/b]  —  "
+                    "Ctrl+S to save, Escape to cancel",
+                    id="edit-hint",
+                )
+                yield TextArea(self.initial_text, id="edit-area")
+
+        def on_mount(self) -> None:
+            self.query_one("#edit-area", TextArea).focus()
+
+        def action_save(self) -> None:
+            text = self.query_one("#edit-area", TextArea).text
+            self.dismiss(text)
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
 
     class HunchPanel(App):
         CSS = """
@@ -161,6 +230,7 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             Binding("g", "label_good", "Good"),
             Binding("b", "label_bad", "Bad"),
             Binding("s", "label_skip", "Skip"),
+            Binding("e", "edit_hunch", "Edit"),
             Binding("a", "toggle_show_all", "Show all"),
             Binding("r", "refresh", "Refresh"),
             Binding("q", "quit", "Quit"),
@@ -219,10 +289,12 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             table.clear()
             for r in visible:
                 ds = snap.display_status_for(r.hunch_id, r)
+                edit = snap.edits.get(r.hunch_id)
+                smell = edit.edited_smell if edit else r.smell
                 table.add_row(
                     r.hunch_id,
                     ds,
-                    _truncate(r.smell, 70),
+                    _truncate(smell, 70),
                     key=r.hunch_id,
                 )
 
@@ -276,10 +348,14 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
                 detail.update("")
                 return
             ds = self.snapshot.display_status_for(r.hunch_id, r)
+            edit = self.snapshot.edits.get(r.hunch_id)
+            smell = edit.edited_smell if edit else r.smell
+            description = edit.edited_description if edit else r.description
+            edited_tag = "  [i](edited)[/i]" if edit else ""
             detail.update(
-                f"[b]{r.hunch_id}[/b]  ({ds})\n"
-                f"[b]{_markup_escape(r.smell)}[/b]\n\n"
-                f"{_markup_escape(r.description)}"
+                f"[b]{r.hunch_id}[/b]  ({ds}){edited_tag}\n"
+                f"[b]{_markup_escape(smell)}[/b]\n\n"
+                f"{_markup_escape(description)}"
             )
 
         # -------- actions --------
@@ -298,6 +374,52 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
 
         def action_label_skip(self) -> None:
             self._label_current("skip")
+
+        def action_edit_hunch(self) -> None:
+            table = self.query_one("#table", DataTable)
+            key = self._current_cursor_key(table)
+            if key is None or self.snapshot is None:
+                self.notify("no hunch selected", severity="warning")
+                return
+            records = {r.hunch_id: r for r in self.snapshot.records}
+            r = records.get(key)
+            if r is None:
+                return
+
+            def _on_edit_result(result: str | None) -> None:
+                if result is None:
+                    return
+                sep = _EDIT_SEPARATOR
+                if sep in result:
+                    edited_smell, edited_desc = result.split(sep, 1)
+                else:
+                    edited_smell = result
+                    edited_desc = ""
+                edited_smell = edited_smell.strip()
+                edited_desc = edited_desc.strip()
+                if not edited_smell:
+                    self.notify("smell cannot be empty", severity="warning")
+                    return
+                ts = _utc_now_iso()
+                try:
+                    self.feedback_writer.write_edit(
+                        hunch_id=r.hunch_id,
+                        original_smell=r.smell,
+                        original_description=r.description,
+                        edited_smell=edited_smell,
+                        edited_description=edited_desc,
+                        ts=ts,
+                    )
+                except Exception as e:
+                    self.notify(f"edit write failed: {e}", severity="error")
+                    return
+                self.notify(f"{r.hunch_id} edited")
+                self._refresh_snapshot()
+
+            self.push_screen(
+                EditScreen(r.hunch_id, r.smell, r.description),
+                callback=_on_edit_result,
+            )
 
         def _label_current(self, label: str) -> None:
             table = self.query_one("#table", DataTable)

@@ -73,8 +73,69 @@ class FeedbackWriter:
             }
         )
 
+    def write_edit(
+        self,
+        hunch_id: str,
+        original_smell: str,
+        original_description: str,
+        edited_smell: str,
+        edited_description: str,
+        ts: str,
+    ) -> None:
+        """Record that the Scientist edited a hunch before approval."""
+        self._append(
+            {
+                "ts": ts,
+                "hunch_id": hunch_id,
+                "channel": "edit",
+                "original_smell": original_smell,
+                "original_description": original_description,
+                "edited_smell": edited_smell,
+                "edited_description": edited_description,
+            }
+        )
+
     def _append(self, entry: dict[str, Any]) -> None:
         append_json_line(self.feedback_path, entry)
+
+
+@dataclass(frozen=True)
+class HunchEdit:
+    """A Scientist's edit of a hunch's smell and description."""
+    edited_smell: str
+    edited_description: str
+
+
+def read_hunch_edits(feedback_path: str | Path) -> dict[str, HunchEdit]:
+    """Return `{hunch_id: latest_edit}` from feedback.jsonl.
+
+    Only `channel == "edit"` events contribute. Last-write-wins per hunch_id.
+    Returns `{}` if the file doesn't exist.
+    """
+    feedback_path = Path(feedback_path)
+    if not feedback_path.exists():
+        return {}
+    edits: dict[str, HunchEdit] = {}
+    with open(feedback_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if d.get("channel") != "edit":
+                continue
+            hid = d.get("hunch_id")
+            smell = d.get("edited_smell")
+            desc = d.get("edited_description")
+            if hid and smell is not None:
+                edits[hid] = HunchEdit(
+                    edited_smell=smell,
+                    edited_description=desc or "",
+                )
+    return edits
 
 
 def read_labeled_hunch_ids(feedback_path: str | Path) -> dict[str, str]:
