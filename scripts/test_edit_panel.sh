@@ -4,10 +4,12 @@
 # Creates a temp directory with two mock hunches, then opens hunch panel.
 #
 # In the panel:
-#   1. Select h-0001 and press 'e' to edit. Modify the text, press Ctrl+S.
-#   2. Verify the detail pane shows "(edited)" and the edited text.
-#   3. Press 'g' to approve. Verify status changes to "approved".
-#   4. Check feedback.jsonl for the edit event:
+#   1. Select h-0001 and press 'e' to edit.
+#   2. Two fields appear: "Smell" (top) and "Description" (bottom).
+#      Modify either or both, then press Ctrl+S.
+#   3. Verify the detail pane shows "(edited)" and the edited text.
+#   4. Press 'g' to approve. Verify status changes to "approved".
+#   5. Check feedback.jsonl for the edit event:
 #      cat $REPLAY_DIR/feedback.jsonl | python3 -m json.tool
 #
 # After quitting (q), the script prints the feedback.jsonl contents.

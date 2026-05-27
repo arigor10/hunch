@@ -153,13 +153,10 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
         )
         return 1
 
-    _EDIT_SEPARATOR = "\n---\n"
+    class EditScreen(ModalScreen[tuple[str, str] | None]):
+        """Modal editor with separate fields for smell and description.
 
-    class EditScreen(ModalScreen[str | None]):
-        """Modal editor for hunch smell + description.
-
-        Pre-populated with: smell + separator + description.
-        Returns the edited text on Ctrl+S, or None on Escape.
+        Returns (smell, description) on Ctrl+S, or None on Escape.
         """
 
         CSS = """
@@ -178,7 +175,20 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             padding: 0 1;
             background: $boost;
         }
-        #edit-area {
+        .field-label {
+            height: 1;
+            padding: 0 1;
+            color: $text-muted;
+        }
+        #smell-area {
+            height: auto;
+            min-height: 3;
+            max-height: 8;
+        }
+        #desc-label {
+            margin-top: 1;
+        }
+        #desc-area {
             height: 1fr;
         }
         """
@@ -191,7 +201,8 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
         def __init__(self, hunch_id: str, smell: str, description: str) -> None:
             super().__init__()
             self.hunch_id = hunch_id
-            self.initial_text = f"{smell}{_EDIT_SEPARATOR}{description}"
+            self._smell = smell
+            self._description = description
 
         def compose(self) -> ComposeResult:
             with Vertical(id="edit-container"):
@@ -200,14 +211,18 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
                     "Ctrl+S to save, Escape to cancel",
                     id="edit-hint",
                 )
-                yield TextArea(self.initial_text, id="edit-area")
+                yield Static("Smell (one-liner):", classes="field-label")
+                yield TextArea(self._smell, id="smell-area")
+                yield Static("Description:", classes="field-label", id="desc-label")
+                yield TextArea(self._description, id="desc-area")
 
         def on_mount(self) -> None:
-            self.query_one("#edit-area", TextArea).focus()
+            self.query_one("#smell-area", TextArea).focus()
 
         def action_save(self) -> None:
-            text = self.query_one("#edit-area", TextArea).text
-            self.dismiss(text)
+            smell = self.query_one("#smell-area", TextArea).text.strip()
+            desc = self.query_one("#desc-area", TextArea).text.strip()
+            self.dismiss((smell, desc))
 
         def action_cancel(self) -> None:
             self.dismiss(None)
@@ -386,17 +401,10 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             if r is None:
                 return
 
-            def _on_edit_result(result: str | None) -> None:
+            def _on_edit_result(result: tuple[str, str] | None) -> None:
                 if result is None:
                     return
-                sep = _EDIT_SEPARATOR
-                if sep in result:
-                    edited_smell, edited_desc = result.split(sep, 1)
-                else:
-                    edited_smell = result
-                    edited_desc = ""
-                edited_smell = edited_smell.strip()
-                edited_desc = edited_desc.strip()
+                edited_smell, edited_desc = result
                 if not edited_smell:
                     self.notify("smell cannot be empty", severity="warning")
                     return
