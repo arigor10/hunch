@@ -8,17 +8,17 @@ hunches emitted by a running framework show up without reload.
 Layout:
 
     ┌─ Header ───────────────────────────────────────────────────┐
-    │ Hunch — 3 pending · 2 surfaced · 1 labeled                 │
+    │ Hunch — 3 pending · 1 approved · 2 delivered               │
     ├─ Hunch list (one per row, selectable) ─────────────────────┤
-    │ > h-0007  pending  calibration drift                       │
-    │   h-0008  surfaced ordering inconsistency                  │
-    │   h-0009  surfaced figure caption mismatch     [bad]       │
+    │ > h-0007  pending   calibration drift                      │
+    │   h-0008  delivered ordering inconsistency                 │
+    │   h-0009  dismissed figure caption mismatch                │
     ├─ Expanded detail for the selected hunch ───────────────────┤
     │ h-0007  (pending)                                          │
     │ calibration drift                                          │
     │ 3× discrepancy between runs A and B...                     │
     ├─ Footer (keybinds) ────────────────────────────────────────┤
-    │ g Good  b Bad  s Skip  r Refresh  a All/unlabeled  q Quit  │
+    │ g Good  b Bad  s Skip  r Refresh  a Show all  q Quit       │
     └────────────────────────────────────────────────────────────┘
 
 Import of `textual` is deferred to `run()` so the rest of the package
@@ -42,6 +42,23 @@ from hunch.journal.hunches import HunchRecord, read_current_hunches
 # Data snapshot (pure, testable)
 # ---------------------------------------------------------------------------
 
+def display_status(record: HunchRecord, label: str) -> str:
+    """Derive user-facing status from raw hunch status + feedback label."""
+    if record.status == "surfaced":
+        return "delivered"
+    if record.status == "filtered":
+        return "filtered"
+    if record.status not in ("pending", ""):
+        return record.status
+    if label == "good":
+        return "approved"
+    if label == "bad":
+        return "dismissed"
+    if label == "skip":
+        return "skipped"
+    return "pending"
+
+
 @dataclass(frozen=True)
 class PanelSnapshot:
     """One poll's view of the replay buffer, merged for display."""
@@ -49,16 +66,23 @@ class PanelSnapshot:
     labels: dict[str, str]
     max_tick_seq: int = 0
 
-    def visible(self, show_labeled: bool) -> list[HunchRecord]:
-        if show_labeled:
+    def display_status_for(self, hunch_id: str, record: HunchRecord) -> str:
+        return display_status(record, self.labels.get(hunch_id, ""))
+
+    def visible(self, show_all: bool) -> list[HunchRecord]:
+        if show_all:
             return list(self.records)
-        return [r for r in self.records if r.hunch_id not in self.labels]
+        return [
+            r for r in self.records
+            if self.display_status_for(r.hunch_id, r) in ("pending", "approved")
+        ]
 
     def counts(self) -> dict[str, int]:
-        pending = sum(1 for r in self.records if r.status == "pending")
-        surfaced = sum(1 for r in self.records if r.status == "surfaced")
-        labeled = len(self.labels)
-        return {"pending": pending, "surfaced": surfaced, "labeled": labeled}
+        counts: dict[str, int] = {}
+        for r in self.records:
+            ds = self.display_status_for(r.hunch_id, r)
+            counts[ds] = counts.get(ds, 0) + 1
+        return counts
 
 
 def read_max_tick_seq(conversation_path: Path) -> int:
@@ -142,7 +166,7 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             Binding("q", "quit", "Quit"),
         ]
 
-        show_labeled: reactive[bool] = reactive(False)
+        show_all: reactive[bool] = reactive(False)
         snapshot: reactive[PanelSnapshot | None] = reactive(None)
 
         def __init__(self, replay_dir: Path, poll_s: float) -> None:
@@ -157,7 +181,7 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             yield Header(show_clock=True)
             yield Static("", id="status")
             table = DataTable(id="table", cursor_type="row")
-            table.add_columns("id", "status", "smell", "label")
+            table.add_columns("id", "status", "smell")
             yield table
             yield Static("", id="detail")
             yield Footer()
@@ -181,7 +205,7 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
                 return
             self._rebuild_table(new)
 
-        def watch_show_labeled(self, old: bool, new: bool) -> None:
+        def watch_show_all(self, old: bool, new: bool) -> None:
             if self.snapshot is not None:
                 self._rebuild_table(self.snapshot)
 
@@ -189,17 +213,16 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             table: Any = self.query_one("#table", DataTable)
             status_widget: Static = self.query_one("#status", Static)
 
-            visible = snap.visible(self.show_labeled)
+            visible = snap.visible(self.show_all)
             prev_cursor_key = self._current_cursor_key(table)
 
             table.clear()
             for r in visible:
-                label = snap.labels.get(r.hunch_id, "")
+                ds = snap.display_status_for(r.hunch_id, r)
                 table.add_row(
                     r.hunch_id,
-                    r.status,
+                    ds,
                     _truncate(r.smell, 70),
-                    label,
                     key=r.hunch_id,
                 )
 
@@ -211,10 +234,14 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
                         break
 
             c = snap.counts()
-            mode = "all" if self.show_labeled else "unlabeled"
+            mode = "all" if self.show_all else "active"
+            parts = []
+            for key in ("pending", "approved", "delivered", "dismissed", "skipped", "filtered"):
+                n = c.get(key, 0)
+                if n:
+                    parts.append(f"{n} {key}")
             status_widget.update(
-                f"Hunch — {c['pending']} pending · {c['surfaced']} surfaced · "
-                f"{c['labeled']} labeled  ·  events: {snap.max_tick_seq}  ·  "
+                f"Hunch — {' · '.join(parts)}  ·  events: {snap.max_tick_seq}  ·  "
                 f"showing: {mode} ({len(visible)} of {len(snap.records)})"
             )
             self._refresh_detail()
@@ -248,10 +275,9 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             if r is None:
                 detail.update("")
                 return
-            label = self.snapshot.labels.get(r.hunch_id, "")
-            label_line = f"  —  labeled: {label}" if label else ""
+            ds = self.snapshot.display_status_for(r.hunch_id, r)
             detail.update(
-                f"[b]{r.hunch_id}[/b]  ({r.status}){label_line}\n"
+                f"[b]{r.hunch_id}[/b]  ({ds})\n"
                 f"[b]{_markup_escape(r.smell)}[/b]\n\n"
                 f"{_markup_escape(r.description)}"
             )
@@ -259,7 +285,7 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
         # -------- actions --------
 
         def action_toggle_show_all(self) -> None:
-            self.show_labeled = not self.show_labeled
+            self.show_all = not self.show_all
 
         def action_refresh(self) -> None:
             self._refresh_snapshot()

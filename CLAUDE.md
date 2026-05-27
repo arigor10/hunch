@@ -34,4 +34,4 @@ cd /home/arigor/YoC/hunch && python3 -m pytest tests/ -x -q
 - `hunch/filter/core.py` — post-critic dedup + novelty filter
 - `hunch/replay/driver.py` — offline replay pipeline
 - `hunch/run.py` — online (live session) pipeline
-- `hunch/hook/` — Claude Code hooks (stop, user_prompt_submit)
+- `hunch/hook/` — Claude Code hooks (stop, user_prompt_submit, stop_delivery for async rewake)

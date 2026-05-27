@@ -392,6 +392,41 @@ def _claude_available() -> bool:
         return False
 
 
+def _read_session_transcript(project_dir: Path) -> str:
+    """Read the Claude Code session transcript for a project directory.
+
+    Claude Code writes transcripts to ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl
+    where the cwd is encoded by replacing / and _ with -.
+    """
+    encoded = str(project_dir).replace("/", "-").replace("_", "-")
+    transcript_dir = Path.home() / ".claude" / "projects" / encoded
+    if not transcript_dir.exists():
+        raise FileNotFoundError(
+            f"No transcript directory at {transcript_dir} "
+            f"(project_dir={project_dir})"
+        )
+    jsonl_files = sorted(transcript_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+    if not jsonl_files:
+        raise FileNotFoundError(
+            f"No .jsonl files in {transcript_dir}"
+        )
+    return jsonl_files[-1].read_text()
+
+
+def _assert_hunch_in_transcript(project_dir: Path, hid: str, smell: str) -> None:
+    """Verify the hunch injection block appears in the session transcript."""
+    transcript = _read_session_transcript(project_dir)
+    assert "<hunch-injection>" in transcript, (
+        "Injection block not found in session transcript"
+    )
+    assert hid in transcript, (
+        f"Hunch ID {hid} not found in session transcript"
+    )
+    assert smell in transcript, (
+        f"Hunch smell {smell!r} not found in session transcript"
+    )
+
+
 @pytest.mark.e2e
 @pytest.mark.skipif(not _claude_available(), reason="claude CLI not installed")
 class TestHookDeliveryE2E:
@@ -427,7 +462,10 @@ class TestHookDeliveryE2E:
 
         result = subprocess.run(
             [
-                "claude", "-p", "Reply with exactly: E2E_OK",
+                "claude", "-p",
+                "You may receive a <hunch-injection> block as context. "
+                "If so, repeat the hunch ID (e.g. h-0001) in your response. "
+                "Otherwise reply with exactly: NO_HUNCH",
                 "--model", "claude-haiku-4-5-20251001",
                 "--output-format", "json",
             ],
@@ -445,6 +483,12 @@ class TestHookDeliveryE2E:
         assert len(surfaced) == 1
         assert surfaced[0].hunch_id == hid
         assert surfaced[0].history[0]["by"] == "hook:user_prompt_submit"
+
+        assert hid in result.stdout, (
+            f"Expected {hid} in Claude's response, got: {result.stdout[:500]}"
+        )
+
+        _assert_hunch_in_transcript(project_dir, hid, "E2E test smell")
 
     def test_async_rewake_delivery_via_claude_p(self, tmp_path):
         """Approve a hunch AFTER Claude starts — tests asyncRewake path.
@@ -483,7 +527,9 @@ class TestHookDeliveryE2E:
         # Start claude -p non-blocking
         proc = subprocess.Popen(
             [
-                "claude", "-p", "Reply with exactly: ASYNC_TEST",
+                "claude", "-p",
+                "Say WAITING. If you later receive a <hunch-injection> block, "
+                "repeat the hunch ID (e.g. h-0001) in your response.",
                 "--model", "claude-haiku-4-5-20251001",
                 "--output-format", "json",
             ],
@@ -500,7 +546,14 @@ class TestHookDeliveryE2E:
         t = threading.Thread(target=_approve_after_delay)
         t.start()
 
-        proc.wait(timeout=90)
+        try:
+            stdout, stderr = proc.communicate(timeout=90)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = proc.communicate()
+            raise AssertionError(
+                f"Claude process timed out.\nSTDOUT:\n{out[:1000]}\nSTDERR:\n{err[:1000]}"
+            )
         t.join()
 
         records = read_current_hunches(replay / "hunches.jsonl")
@@ -511,3 +564,9 @@ class TestHookDeliveryE2E:
         )
         assert surfaced[0].hunch_id == hid
         assert surfaced[0].history[0]["by"] == "hook:stop_delivery"
+
+        assert hid in stdout, (
+            f"Expected {hid} in Claude's response, got: {stdout[:500]}"
+        )
+
+        _assert_hunch_in_transcript(project_dir, hid, "async rewake smell")

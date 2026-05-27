@@ -107,7 +107,7 @@ In a third terminal:
 hunch panel
 ```
 
-This shows a live-updating list of hunches with their statuses. Use keyboard shortcuts to label each hunch as good, bad, or skip. Only hunches labeled "good" are surfaced to the Researcher on your next message. "Bad" suppresses the hunch; "skip" leaves it unlabeled for later review.
+This shows a live-updating list of hunches with their statuses. Use keyboard shortcuts to label each hunch as good, bad, or skip. Hunches labeled "good" are automatically delivered to the Researcher within ~5 seconds — you don't need to send a message. The TUI shows the lifecycle: **pending** → **approved** (you pressed `g`) → **delivered** (the Researcher received it). "Bad" dismisses the hunch; "skip" leaves it for later review.
 
 Don't overthink the labels during a session — if you're unsure, it's often faster to just let the Researcher respond to the hunch than to evaluate it yourself. Although the labels feed into precision/recall evaluations of the Critic, you can always revisit them in [offline evaluation](#reviewing-results), through a much friendlier UI.
 
@@ -120,15 +120,19 @@ hunch label h-0003 good                 # mark a hunch
 
 ## How hunches reach the Researcher
 
-When you type your next message in Claude Code, the `UserPromptSubmit` hook fires. It reads `hunches.jsonl`, finds any pending hunches, and prepends them as `additionalContext` to your message. The Researcher sees something like:
+When you approve a hunch (press `g` in the side panel), an async background hook delivers it to the Researcher within ~5 seconds. You'll see the injection appear in the Researcher's terminal as a system message:
 
 ```
-[Critic hunch, 2 min ago]
-The calibration results in exp_042.md show a 3x discrepancy...
-[/Critic hunch]
+<hunch-injection>
+## Hunch h-0042
+**Smell:** The calibration results in exp_042.md show a 3x discrepancy...
+**Description:** Details with citations...
+</hunch-injection>
 ```
 
-You don't need to do anything — it happens automatically. If you've labeled a hunch as "bad" or "skip" in the panel, it won't be injected.
+No action needed on your part — the Researcher receives it and responds automatically. If you've labeled a hunch as "bad" or "skip", it won't be injected.
+
+A fallback `UserPromptSubmit` hook also checks for approved hunches when you send a message, catching anything the async watcher missed.
 
 ## tmux layout (recommended)
 

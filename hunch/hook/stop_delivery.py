@@ -36,7 +36,7 @@ from hunch.journal.feedback import read_labeled_hunch_ids
 from hunch.journal.hunches import HunchesWriter, read_current_hunches
 
 POLL_INTERVAL_S = 5.0
-MAX_WAIT_S = 300.0
+MAX_WAIT_S = 3600.0
 _LOCK_FILENAME = ".stop_delivery.lock"
 
 
