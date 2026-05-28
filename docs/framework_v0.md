@@ -97,6 +97,20 @@ If we're ever tempted to violate one of these to save time in v0, stop and rethi
 - Each entry carries a monotonic `tick_seq` so consumers can use bookmarks.
 - Artifacts referenced by relative path from the artifacts/ dir, never absolute.
 
+**Hunch injection events:** When the framework delivers a hunch to the Researcher (via either delivery hook), the injection appears in the Claude Code session transcript as a `queue-operation` / `attachment` entry. The parser must capture these as `hunch_injection` events in `conversation.jsonl` so that the Critic and downstream tooling can see what the Researcher actually received:
+
+```jsonc
+{
+  "tick_seq": 1240,
+  "type": "hunch_injection",
+  "timestamp": "2026-05-28T03:05:56Z",
+  "hunch_ids": ["h-0003"],
+  "delivery_hook": "stop_delivery" | "user_prompt_submit"
+}
+```
+
+Without this, the Critic has no visibility into which hunches were delivered or when — making acknowledgment tracking and self-resolution detection impossible from the replay buffer alone.
+
 **Future extensions (doors left open):**
 - Swap polling for `watchdog` (fsevents on macOS, inotify on Linux) — identical file outputs.
 - Capture multiple Researcher sessions to the same replay buffer (for parallel work).
@@ -235,6 +249,31 @@ Both paths format the injection identically and mark hunches as `surfaced` in `h
 
 This avoids a separate HTML template, a separate Flask app, or duplicated conversation rendering. The diff from eval mode is in the data loading layer only: live mode reads from the replay dir with feedback-based status derivation; eval mode reads from eval run dirs with bank-based label resolution.
 
+**Acknowledgment lifecycle:** Delivery alone doesn't close the loop — the Scientist needs to know the Researcher actually processed the hunch and what it concluded. The lifecycle extends from `surfaced` to `acknowledged` via a response mechanism:
+
+- **Injection framing (no ack request at delivery):** Neither the asyncRewake nor UPS injection asks the Researcher to respond immediately. The framing remains "these are observations for the Scientist, not instructions for you — continue with your task." This avoids derailing the Researcher mid-flow. A hunch may take multiple turns to investigate before the Researcher has something substantive to say (e.g., h-0003 in wiser_persona required correcting stale data before the contradiction could be evaluated).
+
+- **UPS reminders (pull-based acknowledgment):** The `UserPromptSubmit` hook, in addition to delivering new approved hunches, checks for surfaced-but-unacknowledged hunches. If any exist, it appends a `<hunch-reminder>` block:
+
+  ```
+  <hunch-reminder>
+  These hunches were delivered earlier. When you've worked through them,
+  include a "Re h-XXXX:" line with your conclusion.
+
+  - [h-0003] Attributing exp_017 null to high loss contradicts exp_015...
+  </hunch-reminder>
+  ```
+
+  Reminder frequency: once on the first UPS after surfacing, then again every N Researcher turns (counted via `tick_seq` in `conversation.jsonl`) if still unacknowledged. This re-injects the hunch text, which also serves as context restoration if the original injection was compressed away.
+
+- **`Re h-XXXX:` response detection:** The parser detects lines matching `Re h-XXXX:` in the Researcher's responses and writes a `hunch_response` event to `feedback.jsonl`:
+  `{"hunch_id": "h-0003", "channel": "response", "response_text": "Stale numbers — exp_015 loss was actually 0.561. No contradiction.", "ts": "..."}`.
+  This transitions the hunch to `acknowledged` status.
+
+- **`acknowledged` status:** New lifecycle state. Indicates the Researcher saw the hunch and responded with a conclusion. The response text is stored in `feedback.jsonl` and displayed in the TUI alongside the hunch. The full lifecycle is now: `pending` → `surfaced` → (optionally `reminded`) → `acknowledged`. A hunch may also be `surfaced` indefinitely if the Researcher never responds — this is visible in the TUI as a distinct state from `acknowledged`.
+
+- **TUI display:** Acknowledged hunches show the Researcher's response text below the smell/description. The Scientist can see at a glance which hunches were processed and what the Researcher concluded, without having to scroll through the conversation.
+
 **Future extensions (doors left open):**
 - **Mid-turn injection** via a `PreToolUse` or `PostToolUse` hook added alongside UserPromptSubmit. Same file, different trigger point.
 - **Guaranteed delivery** via `Stop` hook with `decision: block` — prevents the Researcher from ending its turn while there are unread hunches.
@@ -253,7 +292,11 @@ This avoids a separate HTML template, a separate Flask app, or duplicated conver
   `{"hunch_id", "channel": "edit", "original_smell", "original_description", "edited_smell", "edited_description", "ts"}`.
   Last-write-wins per hunch_id. Both delivery hooks read edits via `read_hunch_edits()` and inject the edited text instead of originals.
 
-Labels and edits are append-only. No deletion. A hunch may accumulate multiple labels (e.g. relabeling from `skip` to `good`); last-write-wins per `hunch_id`.
+- **Responses** — when the Researcher acknowledges a hunch (a line matching `Re h-XXXX:` in its output), the parser writes a `channel: "response"` event to `feedback.jsonl`:
+  `{"hunch_id", "channel": "response", "response_text": "...", "ts"}`.
+  This transitions the hunch to `acknowledged` status. See §5 Surface, Acknowledgment lifecycle.
+
+Labels, edits, and responses are append-only. No deletion. A hunch may accumulate multiple labels (e.g. relabeling from `skip` to `good`); last-write-wins per `hunch_id`.
 
 The UserPromptSubmit hook reads `feedback.jsonl` to enforce the approval gate: only hunches labeled `good` are injected. This makes the label bank grow as a natural byproduct of using the system.
 

@@ -37,7 +37,9 @@ from typing import Any
 from hunch.journal.feedback import (
     FeedbackWriter,
     HunchEdit,
+    HunchResponse,
     read_hunch_edits,
+    read_hunch_responses,
     read_labeled_hunch_ids,
 )
 from hunch.journal.hunches import HunchRecord, read_current_hunches
@@ -47,9 +49,11 @@ from hunch.journal.hunches import HunchRecord, read_current_hunches
 # Data snapshot (pure, testable)
 # ---------------------------------------------------------------------------
 
-def display_status(record: HunchRecord, label: str) -> str:
+def display_status(record: HunchRecord, label: str, acknowledged: bool = False) -> str:
     """Derive user-facing status from raw hunch status + feedback label."""
     if record.status == "surfaced":
+        if acknowledged:
+            return "acknowledged"
         return "delivered"
     if record.status == "filtered":
         return "filtered"
@@ -70,10 +74,15 @@ class PanelSnapshot:
     records: list[HunchRecord]
     labels: dict[str, str]
     edits: dict[str, HunchEdit] = field(default_factory=dict)
+    responses: dict[str, HunchResponse] = field(default_factory=dict)
     max_tick_seq: int = 0
 
     def display_status_for(self, hunch_id: str, record: HunchRecord) -> str:
-        return display_status(record, self.labels.get(hunch_id, ""))
+        return display_status(
+            record,
+            self.labels.get(hunch_id, ""),
+            acknowledged=hunch_id in self.responses,
+        )
 
     def visible(self, show_all: bool) -> list[HunchRecord]:
         if show_all:
@@ -122,8 +131,12 @@ def read_snapshot(replay_dir: Path) -> PanelSnapshot:
     records = read_current_hunches(replay_dir / "hunches.jsonl")
     labels = read_labeled_hunch_ids(feedback_path)
     edits = read_hunch_edits(feedback_path)
+    responses = read_hunch_responses(feedback_path)
     max_seq = read_max_tick_seq(replay_dir / "conversation.jsonl")
-    return PanelSnapshot(records=records, labels=labels, edits=edits, max_tick_seq=max_seq)
+    return PanelSnapshot(
+        records=records, labels=labels, edits=edits,
+        responses=responses, max_tick_seq=max_seq,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +339,7 @@ def run(replay_dir: Path, poll_s: float = 1.0, web_port: int = 5556) -> int:
             c = snap.counts()
             mode = "all" if self.show_all else "active"
             parts = []
-            for key in ("pending", "approved", "delivered", "dismissed", "skipped", "filtered"):
+            for key in ("pending", "approved", "delivered", "acknowledged", "dismissed", "skipped", "filtered"):
                 n = c.get(key, 0)
                 if n:
                     parts.append(f"{n} {key}")
@@ -367,14 +380,20 @@ def run(replay_dir: Path, poll_s: float = 1.0, web_port: int = 5556) -> int:
                 return
             ds = self.snapshot.display_status_for(r.hunch_id, r)
             edit = self.snapshot.edits.get(r.hunch_id)
+            resp = self.snapshot.responses.get(r.hunch_id)
             smell = edit.edited_smell if edit else r.smell
             description = edit.edited_description if edit else r.description
             edited_tag = "  [i](edited)[/i]" if edit else ""
-            detail.update(
-                f"[b]{r.hunch_id}[/b]  ({ds}){edited_tag}\n"
-                f"[b]{_markup_escape(smell)}[/b]\n\n"
-                f"{_markup_escape(description)}"
-            )
+            parts = [
+                f"[b]{r.hunch_id}[/b]  ({ds}){edited_tag}",
+                f"[b]{_markup_escape(smell)}[/b]",
+                "",
+                _markup_escape(description),
+            ]
+            if resp:
+                parts.append("")
+                parts.append(f"[dim]Researcher:[/dim] {_markup_escape(resp.response_text)}")
+            detail.update("\n".join(parts))
 
         # -------- actions --------
 

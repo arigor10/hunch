@@ -336,11 +336,13 @@ def _load_live_hunches(replay_dir: Path) -> tuple[list[dict], dict[str, dict]]:
     records = read_current_hunches(hunches_path)
     raw_labels = read_labeled_hunch_ids(feedback_path)
     edits = read_hunch_edits(feedback_path)
+    from hunch.journal.feedback import read_hunch_responses
+    responses = read_hunch_responses(feedback_path)
 
     items: list[dict] = []
     labels: dict[str, dict] = {}
     for r in records:
-        ds = display_status(r, raw_labels.get(r.hunch_id, ""))
+        ds = display_status(r, raw_labels.get(r.hunch_id, ""), acknowledged=r.hunch_id in responses)
         edit = edits.get(r.hunch_id)
         items.append({
             "hunch_id": r.hunch_id,

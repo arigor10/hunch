@@ -246,3 +246,91 @@ def test_poll_new_events_first_call_detects_project_roots(transcript_factory):
     state = ParserState()
     _, state = poll_new_events(path, state)
     assert state.project_roots == ["/home/arigor/YoC/example_proj/"]
+
+
+# ---------------------------------------------------------------------------
+# Hunch injection + response parsing
+# ---------------------------------------------------------------------------
+
+
+def _queue_operation_record(content: str, ts: str) -> dict:
+    """Simulate a Claude Code queue-operation record (asyncRewake delivery)."""
+    return {
+        "type": "queue-operation",
+        "operation": "enqueue",
+        "timestamp": ts,
+        "content": content,
+    }
+
+
+def _attachment_record(prompt: str, ts: str) -> dict:
+    """Simulate a Claude Code attachment record (hunch injection processed)."""
+    return {
+        "type": "attachment",
+        "timestamp": ts,
+        "attachment": {"type": "queued_command", "prompt": prompt},
+    }
+
+
+def test_hunch_injection_detected_from_queue_operation(transcript_factory, project_root):
+    injection = (
+        '<task-notification><summary>Stop hook</summary></task-notification>\n'
+        '<system-reminder>\nStop hook blocking error: '
+        '<hunch-injection>\n- [h-0003] gradient spike\n</hunch-injection>\n'
+        '</system-reminder>'
+    )
+    path = transcript_factory([_queue_operation_record(injection, "2026-05-28T03:05:56Z")])
+    events, _ = parse_whole_file(path, project_roots=[project_root])
+    injections = [e for e in events if e["type"] == "hunch_injection"]
+    assert len(injections) == 1
+    assert injections[0]["hunch_ids"] == ["h-0003"]
+    assert injections[0]["delivery_hook"] == "stop_delivery"
+
+
+def test_hunch_injection_detected_from_attachment(transcript_factory, project_root):
+    injection = '<hunch-injection>\n- [h-0001] calibration drift\n- [h-0002] seed issue\n</hunch-injection>'
+    path = transcript_factory([_attachment_record(injection, "2026-05-28T03:06:00Z")])
+    events, _ = parse_whole_file(path, project_roots=[project_root])
+    injections = [e for e in events if e["type"] == "hunch_injection"]
+    assert len(injections) == 1
+    assert set(injections[0]["hunch_ids"]) == {"h-0001", "h-0002"}
+
+
+def test_hunch_response_detected_in_assistant_text(transcript_factory, project_root):
+    path = transcript_factory([
+        transcript_factory.assistant_text(
+            "Re h-0003: Stale numbers — exp_015 loss was actually 0.561.",
+            "2026-05-28T04:00:00Z",
+        ),
+    ])
+    events, _ = parse_whole_file(path, project_roots=[project_root])
+    responses = [e for e in events if e["type"] == "hunch_response"]
+    assert len(responses) == 1
+    assert responses[0]["hunch_id"] == "h-0003"
+    assert "0.561" in responses[0]["response_text"]
+
+    texts = [e for e in events if e["type"] == "assistant_text"]
+    assert len(texts) == 1
+
+
+def test_multiple_hunch_responses_in_one_message(transcript_factory, project_root):
+    text = (
+        "Re h-0001: Fixed the seed contamination.\n"
+        "Re h-0003: No contradiction once data corrected."
+    )
+    path = transcript_factory([transcript_factory.assistant_text(text, "t1")])
+    events, _ = parse_whole_file(path, project_roots=[project_root])
+    responses = [e for e in events if e["type"] == "hunch_response"]
+    assert len(responses) == 2
+    ids = {r["hunch_id"] for r in responses}
+    assert ids == {"h-0001", "h-0003"}
+
+
+def test_no_false_positive_hunch_response(transcript_factory, project_root):
+    """Regular assistant text without 'Re h-XXXX:' produces no hunch_response."""
+    path = transcript_factory([
+        transcript_factory.assistant_text("The results look good.", "t1"),
+    ])
+    events, _ = parse_whole_file(path, project_roots=[project_root])
+    responses = [e for e in events if e["type"] == "hunch_response"]
+    assert responses == []

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from hunch.journal.append import append_json_line
+from hunch.journal.feedback import FeedbackWriter
 from hunch.parse import Event, ParserState, poll_new_events
 
 
@@ -125,6 +126,8 @@ class ReplayBufferWriter:
         For each event:
           - artifact_write/edit: snapshot content, log to both
             conversation.jsonl and artifacts.jsonl.
+          - hunch_response: log to conversation.jsonl AND write an
+            acknowledgment to feedback.jsonl.
           - everything else: log to conversation.jsonl only.
 
         Events are written in order; tick_seq is assigned monotonically.
@@ -137,8 +140,15 @@ class ReplayBufferWriter:
                 self._handle_artifact_write(event, project_roots)
             elif etype == "artifact_edit":
                 self._handle_artifact_edit(event, project_roots)
+            elif etype == "hunch_response":
+                self._append_conversation({
+                    "tick_seq": self.tick_seq,
+                    **event,
+                })
+                self._write_response_to_feedback(event)
             else:
-                # Pass-through events (text, figure, tool_error)
+                # Pass-through events (text, figure, tool_error,
+                # hunch_injection, etc.)
                 self._append_conversation({
                     "tick_seq": self.tick_seq,
                     **event,
@@ -254,6 +264,18 @@ class ReplayBufferWriter:
             "snapshot": snapshot_name,
             "content_hash": content_hash,
         })
+
+    # -----------------------------------------------------------------
+    # Hunch response → feedback.jsonl
+    # -----------------------------------------------------------------
+
+    def _write_response_to_feedback(self, event: Event) -> None:
+        fw = FeedbackWriter(feedback_path=self.replay_dir / "feedback.jsonl")
+        fw.write_response(
+            hunch_id=event["hunch_id"],
+            response_text=event["response_text"],
+            ts=event["timestamp"],
+        )
 
     # -----------------------------------------------------------------
     # File I/O (thin wrappers for append-only semantics)
