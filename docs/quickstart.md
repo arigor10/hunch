@@ -107,9 +107,21 @@ In a third terminal:
 hunch panel
 ```
 
-This shows a live-updating list of hunches with their statuses. Use keyboard shortcuts to label each hunch as good, bad, or skip. Hunches labeled "good" are automatically delivered to the Researcher within ~5 seconds — you don't need to send a message. The TUI shows the lifecycle: **pending** → **approved** (you pressed `g`) → **delivered** (the Researcher received it). "Bad" dismisses the hunch; "skip" leaves it for later review.
+This shows a live-updating list of hunches with their statuses. Use keyboard shortcuts to label each hunch as good, bad, or skip. Press `e` to edit a hunch's smell or description before approving it — the edited text is what the Researcher will see. Hunches labeled "good" are automatically delivered to the Researcher within ~5 seconds — you don't need to send a message. The TUI shows the lifecycle: **pending** → **approved** (you pressed `g`) → **delivered** (the Researcher received it). "Bad" dismisses the hunch; "skip" leaves it for later review.
 
 Don't overthink the labels during a session — if you're unsure, it's often faster to just let the Researcher respond to the hunch than to evaluate it yourself. Although the labels feed into precision/recall evaluations of the Critic, you can always revisit them in [offline evaluation](#reviewing-results), through a much friendlier UI.
+
+### Context viewer (web UI)
+
+The TUI is fast for triage, but doesn't show the conversation context that triggered a hunch. When `hunch panel` starts, it also launches a local web server:
+
+```
+Context viewer: http://localhost:5556
+```
+
+Open this URL in a browser to see each hunch alongside the conversation it was reacting to — the same scrollable, highlighted view used by the [offline annotation tool](#reviewing-results), but read-only and live-updating. Use the TUI to label and edit; use the browser when you want to see context.
+
+**Quick jump:** press `o` on a hunch in the TUI to open it directly in the browser, scrolled to the right conversation context.
 
 ### Command line (in case you don't like `hunch panel`)
 

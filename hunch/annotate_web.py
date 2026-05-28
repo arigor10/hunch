@@ -41,6 +41,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hunch.journal.feedback import read_hunch_edits, read_labeled_hunch_ids
+from hunch.journal.hunches import read_current_hunches
+from hunch.panel import display_status
+
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -322,6 +326,38 @@ def _resolve_bank_labels(state: Any, items: list[dict]) -> dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
+# Live-mode helpers
+# ---------------------------------------------------------------------------
+
+def _load_live_hunches(replay_dir: Path) -> tuple[list[dict], dict[str, dict]]:
+    """Load hunches + labels for live mode. Re-reads on each call."""
+    hunches_path = replay_dir / "hunches.jsonl"
+    feedback_path = replay_dir / "feedback.jsonl"
+    records = read_current_hunches(hunches_path)
+    raw_labels = read_labeled_hunch_ids(feedback_path)
+    edits = read_hunch_edits(feedback_path)
+
+    items: list[dict] = []
+    labels: dict[str, dict] = {}
+    for r in records:
+        ds = display_status(r, raw_labels.get(r.hunch_id, ""))
+        edit = edits.get(r.hunch_id)
+        items.append({
+            "hunch_id": r.hunch_id,
+            "smell": edit.edited_smell if edit else r.smell,
+            "description": edit.edited_description if edit else r.description,
+            "bookmark_prev": r.bookmark_prev,
+            "bookmark_now": r.bookmark_now,
+            "emitted_by_tick": r.emitted_by_tick,
+            "triggering_refs": r.triggering_refs or {},
+            "display_status": ds,
+            "edited": edit is not None,
+        })
+        labels[r.hunch_id] = {"display_status": ds, "edited": edit is not None}
+    return items, labels
+
+
+# ---------------------------------------------------------------------------
 # HTML template
 # ---------------------------------------------------------------------------
 
@@ -515,6 +551,7 @@ let hunches = [];
 let labels = {};
 let currentIdx = 0;
 let bankMode = false;
+let liveMode = false;
 let availableRuns = [];
 const KNOWN_TAGS = ['not_novel', 'borderline', 'interesting', 'nit'];
 
@@ -522,17 +559,40 @@ async function init() {
     const cfgResp = await fetch('/api/config');
     const cfg = await cfgResp.json();
     bankMode = cfg.bank_mode || false;
+    liveMode = cfg.live_mode || false;
     availableRuns = cfg.runs || [];
 
     const rdEl = document.getElementById('run-dir');
-    rdEl.textContent = cfg.project_dir || cfg.run_dir || '';
+    rdEl.textContent = cfg.project_dir || cfg.run_dir || cfg.replay_dir || '';
     rdEl.title = rdEl.textContent;
+
+    if (liveMode) {
+        document.querySelectorAll('.label-btn').forEach(el => el.style.display = 'none');
+        document.getElementById('btn-clear').style.display = 'none';
+        document.getElementById('shortcuts').innerHTML = '<kbd>&larr;</kbd><kbd>&rarr;</kbd> nav &middot; read-only &middot; label in TUI';
+        document.title = 'Hunch — Live Context';
+        setInterval(pollLiveHunches, 3000);
+    }
 
     if (bankMode && availableRuns.length > 0) {
         renderRunSelector();
     }
 
     await refreshHunches();
+
+    if (liveMode && window.location.hash) {
+        const targetId = decodeURIComponent(window.location.hash.slice(1));
+        const idx = hunches.findIndex(h => h.hunch_id === targetId);
+        if (idx >= 0) selectHunch(idx);
+    }
+}
+
+async function pollLiveHunches() {
+    const prevIds = hunches.map(h => h.hunch_id).join(',');
+    const prevStatuses = Object.values(labels).map(l => l.display_status || '').join(',');
+    await refreshHunches();
+    const newIds = hunches.map(h => h.hunch_id).join(',');
+    const newStatuses = Object.values(labels).map(l => l.display_status || '').join(',');
 }
 
 async function refreshHunches() {
@@ -588,7 +648,13 @@ function renderList() {
         const id = itemId(h);
         const lbl = labels[id];
         let badge = '';
-        if (lbl) {
+        if (liveMode && lbl) {
+            const st = lbl.display_status || 'pending';
+            const stColors = {pending:'#555',approved:'#2d6a4f',delivered:'#0f3460',dismissed:'#9d0208',skipped:'#555',filtered:'#4a3800'};
+            const bg = stColors[st] || '#555';
+            badge = `<span class="label-badge" style="background:${bg};color:#fff">${st}</span>`;
+            if (lbl.edited) badge += `<span style="color:#7eb8da;font-size:9px;margin-left:2px;font-style:italic">edited</span>`;
+        } else if (lbl) {
             if (lbl.duplicate_of) {
                 badge = `<span class="label-badge badge-dup">DUP</span>`;
             } else {
@@ -628,6 +694,39 @@ function renderDetail(h) {
     const smell = itemSmell(h);
     const desc = itemDesc(h);
     const lbl = labels[id];
+
+    const chunkList = (h.triggering_refs || {}).chunks || [];
+    const chunkLinks = chunkList.length
+        ? chunkList.map(c => {
+            const num = parseInt(c.split('-')[1], 10);
+            return `<a href="#" class="artifact-link" onclick="scrollToTick(${num}, 'center'); return false;">${esc(c)}</a>`;
+          }).join(', ')
+        : '(none)';
+    const artList = (h.triggering_refs || {}).artifacts || [];
+    const artLinks = artList.length
+        ? artList.map(a => `<a href="#" class="artifact-link" onclick="openArtifact('${esc(a)}'); return false;">${esc(a)}</a>`).join(', ')
+        : '(none)';
+
+    if (liveMode) {
+        const st = (lbl && lbl.display_status) || 'pending';
+        const stColors = {pending:'#555',approved:'#2d6a4f',delivered:'#0f3460',dismissed:'#9d0208',skipped:'#555',filtered:'#4a3800'};
+        const bg = stColors[st] || '#555';
+        const statusBadge = `<span class="label-badge" style="background:${bg};color:#fff;font-size:13px;padding:3px 10px">${st}</span>`;
+        const editedTag = (lbl && lbl.edited) ? ' <span style="color:#7eb8da;font-style:italic;font-size:12px">(edited)</span>' : '';
+        document.getElementById('current-label').innerHTML = statusBadge + editedTag;
+        document.getElementById('detail-pane').innerHTML = `
+            <h2>${esc(h.hunch_id)} ${statusBadge}${editedTag}</h2>
+            <div class="meta">critic tick ${h.emitted_by_tick} &middot; <a href="#" class="artifact-link" onclick="scrollToTick(${h.bookmark_prev}, 'start'); return false;">conversation window ${h.bookmark_prev}..${h.bookmark_now}</a></div>
+            <div class="smell">${esc(smell)}</div>
+            <div class="description">${esc(desc)}</div>
+            <div class="refs">Refs: ${chunkLinks}<br>Artifacts: ${artLinks}</div>
+            <div style="margin-top:16px;padding:8px 12px;background:#16213e;border:1px solid #333;border-radius:4px;font-size:12px;color:#888">
+                Label and edit hunches in the TUI (<kbd>g</kbd> good, <kbd>b</kbd> bad, <kbd>s</kbd> skip, <kbd>e</kbd> edit).
+            </div>
+        `;
+        return;
+    }
+
     let labelDisplay = '';
     if (lbl) {
         const cls = lbl.label === 'tp' ? 'badge-tp' : lbl.label === 'fp' ? 'badge-fp' : 'badge-skip';
@@ -650,18 +749,6 @@ function renderDetail(h) {
     document.getElementById('current-label').innerHTML = labelDisplay;
     const clearBtn = document.getElementById('btn-clear');
     clearBtn.style.display = (bankMode && lbl && lbl.source === 'human') ? 'inline-block' : 'none';
-
-    const chunkList = (h.triggering_refs || {}).chunks || [];
-    const chunkLinks = chunkList.length
-        ? chunkList.map(c => {
-            const num = parseInt(c.split('-')[1], 10);
-            return `<a href="#" class="artifact-link" onclick="scrollToTick(${num}, 'center'); return false;">${esc(c)}</a>`;
-          }).join(', ')
-        : '(none)';
-    const artList = (h.triggering_refs || {}).artifacts || [];
-    const artLinks = artList.length
-        ? artList.map(a => `<a href="#" class="artifact-link" onclick="openArtifact('${esc(a)}'); return false;">${esc(a)}</a>`).join(', ')
-        : '(none)';
 
     const displayId = bankMode ? (h.bank_id || h.hunch_id || h.id) : h.hunch_id;
     const bankInfo = (bankMode && h.bank_id) ? `<span class="bank-id">${esc(h.bank_id)}</span> &middot; ` : '';
@@ -875,6 +962,18 @@ async function confirmDup() {
 
 function updateStats() {
     const total = hunches.length;
+    if (liveMode) {
+        const counts = {};
+        Object.values(labels).forEach(l => {
+            const st = l.display_status || 'pending';
+            counts[st] = (counts[st] || 0) + 1;
+        });
+        const parts = ['pending','approved','delivered','dismissed','skipped','filtered']
+            .filter(k => counts[k])
+            .map(k => `${counts[k]} ${k}`);
+        document.getElementById('stats').textContent = `${total} hunches | ${parts.join(' · ')}`;
+        return;
+    }
     const ids = new Set(hunches.map(h => itemId(h)));
     const relevantLabels = Object.entries(labels).filter(([k]) => ids.has(k));
     const labeled = relevantLabels.length;
@@ -1036,6 +1135,7 @@ def create_app(
     project_dir: Path | None = None,
     novel_only: bool = False,
     dedup: bool = False,
+    live: bool = False,
 ) -> Any:
     try:
         from flask import Flask, jsonify, request
@@ -1043,6 +1143,80 @@ def create_app(
         raise ImportError("flask is required: pip install flask")
 
     _validate_replay_dir(replay_dir)
+
+    if live:
+        app = Flask(__name__)
+
+        @app.route("/")
+        def index():
+            return HTML_PAGE
+
+        @app.route("/api/config")
+        def api_config():
+            return jsonify({
+                "replay_dir": str(replay_dir.resolve()),
+                "live_mode": True,
+                "bank_mode": False,
+                "runs": [],
+            })
+
+        @app.route("/api/hunches")
+        def api_hunches():
+            items, live_labels = _load_live_hunches(replay_dir)
+            return jsonify({
+                "hunches": items,
+                "labels": live_labels,
+                "bank_mode": False,
+                "live_mode": True,
+                "unsynced_runs": [],
+            })
+
+        @app.route("/api/hunch/<path:item_id>/context")
+        def api_context(item_id: str):
+            conversation = _load_conversation(replay_dir / "conversation.jsonl")
+            items, _ = _load_live_hunches(replay_dir)
+            item = next((h for h in items if h["hunch_id"] == item_id), None)
+            if item is None:
+                return jsonify({"error": "not found"}), 404
+            bp = item["bookmark_prev"]
+            bn = item["bookmark_now"]
+            lo = max(1, bp - 200)
+            hi = bn + 50
+            events = [
+                e for e in conversation
+                if lo <= e["tick_seq"] <= hi
+                and e["type"] in ("user_text", "assistant_text")
+            ]
+            return jsonify({
+                "events": events,
+                "bookmark_prev": bp,
+                "bookmark_now": bn,
+            })
+
+        @app.route("/api/artifact")
+        def api_artifact():
+            name = request.args.get("name", "")
+            if not name:
+                return jsonify({"error": "missing name"}), 400
+            stem = name.replace("/", "_")
+            arts_dir = replay_dir / "artifacts"
+            if not arts_dir.is_dir():
+                return jsonify({"error": "no artifacts dir"}), 404
+            matches = sorted(
+                p for p in arts_dir.iterdir()
+                if p.name.startswith(stem + "__")
+            )
+            if not matches:
+                return jsonify({"error": f"artifact {name!r} not found"}), 404
+            content = matches[-1].read_text(errors="replace")
+            return jsonify({"name": name, "content": content})
+
+        @app.route("/api/hunch/<path:item_id>/label", methods=["POST"])
+        def api_label(item_id: str):
+            return jsonify({"error": "labeling not available in live mode"}), 400
+
+        return app
+
     conversation = _load_conversation(replay_dir / "conversation.jsonl")
 
     # Determine bank mode vs legacy mode
@@ -1318,6 +1492,7 @@ def run_server(
     novel_only: bool = False,
     dedup: bool = False,
     port: int = 5555,
+    live: bool = False,
 ) -> int:
     if project_dir is not None:
         if replay_dir is None:
@@ -1333,8 +1508,12 @@ def run_server(
         project_dir=project_dir,
         novel_only=novel_only,
         dedup=dedup,
+        live=live,
     )
-    print(f"Annotation UI: http://localhost:{port}")
+    if live:
+        print(f"Live context viewer: http://localhost:{port}")
+    else:
+        print(f"Annotation UI: http://localhost:{port}")
     print(f"  replay: {replay_dir}")
     if project_dir:
         print(f"  project: {project_dir}")

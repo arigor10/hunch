@@ -221,7 +221,17 @@ Both paths format the injection identically and mark hunches as `surfaced` in `h
 - `hunch list` — print current hunches with statuses (useful for scripting and quick inspection without launching the TUI).
 - `hunch label <hunch_id> good|bad|skip` — record an explicit label for a hunch from the command line. Writes to `feedback.jsonl` (same effect as the side-panel keybinding; the approval gate in the UserPromptSubmit hook reads this file).
 - `hunch replay-offline` — drive the Critic offline over a pre-parsed replay directory (or parse a raw Claude log on the fly). Used for evaluation, prompt iteration, and running the Critic against historical sessions.
-- `hunch annotate-web` — browser-based annotation UI (local Flask server) for reviewing hunches with full conversation context, artifact rendering, and figure display. Supports novelty and dedup filtering.
+- `hunch annotate-web` — browser-based annotation UI (local Flask server) for reviewing hunches with full conversation context, artifact rendering, and figure display. Supports novelty and dedup filtering. Used for offline eval.
+
+**Live context web UI:** The TUI (`hunch panel`) is optimized for quick triage but lacks conversation context — the Scientist can't see *what the Critic was reacting to*. To bridge this, `hunch panel` starts a local Flask web server alongside the TUI (on port 5556 by default). The web UI reuses the same `annotate_web.py` application (same HTML, CSS, JS, and conversation renderer) in a **live mode**:
+
+- **Data path:** reads `hunches.jsonl` + `feedback.jsonl` directly from the replay dir on each request. No bank, no run selector, no eval infrastructure. Uses `display_status()` to derive user-facing status (pending/approved/delivered/dismissed/skipped). Overlays edited smell/description from `channel: "edit"` events in `feedback.jsonl`.
+- **Polling:** the browser polls `/api/hunches` every ~3 seconds. Conversation context is loaded on demand when the user clicks a hunch. The conversation.jsonl only appends, so this is cheap.
+- **Read-only:** no labeling buttons. A banner instructs the Scientist to label and edit in the TUI. The web UI is a context viewer, not a labeling tool.
+- **Deep linking from TUI:** pressing `o` in the TUI opens the default browser to `http://localhost:{port}/#{hunch_id}`. The web UI reads the URL hash on load and auto-selects + scrolls to that hunch's conversation context. This lets the Scientist jump from a hunch in the TUI to its full context in one keystroke.
+- **Lifecycle:** the web server starts on a background thread when `hunch panel` launches. It dies when the TUI exits. The `--web-port` flag controls the port (default 5556, distinct from the eval annotator's default of 5555).
+
+This avoids a separate HTML template, a separate Flask app, or duplicated conversation rendering. The diff from eval mode is in the data loading layer only: live mode reads from the replay dir with feedback-based status derivation; eval mode reads from eval run dirs with bank-based label resolution.
 
 **Future extensions (doors left open):**
 - **Mid-turn injection** via a `PreToolUse` or `PostToolUse` hook added alongside UserPromptSubmit. Same file, different trigger point.
@@ -235,15 +245,18 @@ Both paths format the injection identically and mark hunches as `surfaced` in `h
 
 **v0:** Explicit labels only:
 
-- **Explicit** — side-panel keys or `hunch label` CLI write to `feedback.jsonl`:
-  `{"hunch_id", "label": "good"|"bad"|"skip", "ts"}`.
+- **Explicit labels** — side-panel keys or `hunch label` CLI write to `feedback.jsonl`:
+  `{"hunch_id", "channel": "explicit", "label": "good"|"bad"|"skip", "ts"}`.
+- **Edits** — the Scientist can edit a hunch's smell and description before approval (press `e` in the TUI). Edits are stored as `channel: "edit"` events in `feedback.jsonl`:
+  `{"hunch_id", "channel": "edit", "original_smell", "original_description", "edited_smell", "edited_description", "ts"}`.
+  Last-write-wins per hunch_id. Both delivery hooks read edits via `read_hunch_edits()` and inject the edited text instead of originals.
 
-Labels are append-only. No deletion. A hunch may accumulate multiple labels (e.g. relabeling from `skip` to `good`); last-write-wins per `hunch_id`.
+Labels and edits are append-only. No deletion. A hunch may accumulate multiple labels (e.g. relabeling from `skip` to `good`); last-write-wins per `hunch_id`.
 
 The UserPromptSubmit hook reads `feedback.jsonl` to enforce the approval gate: only hunches labeled `good` are injected. This makes the label bank grow as a natural byproduct of using the system.
 
 **Contract:**
-- `feedback.jsonl` is append-only.
+- `feedback.jsonl` is append-only. Two channel types: `explicit` (labels) and `edit` (smell/description edits).
 - The Critic reads `hunches.jsonl` (for prior hunch content and status) and `feedback.jsonl` (for labels) on each tick via `prior_hunches` context to avoid repeating suppressed hunches.
 
 **Future extensions:**

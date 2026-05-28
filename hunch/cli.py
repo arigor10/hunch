@@ -141,6 +141,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="seconds between replay-buffer refreshes (default: 1)",
     )
+    pnl.add_argument(
+        "--web-port",
+        type=int,
+        default=5556,
+        help="port for the live context web viewer (default: 5556)",
+    )
 
     rpo = sub.add_parser(
         "replay-offline",
@@ -1293,7 +1299,7 @@ def _cmd_panel(ns: argparse.Namespace) -> int:
 
     replay_dir = _resolved_replay_dir(ns.replay_dir)
     replay_dir.mkdir(parents=True, exist_ok=True)
-    return panel_run(replay_dir=replay_dir, poll_s=ns.poll)
+    return panel_run(replay_dir=replay_dir, poll_s=ns.poll, web_port=ns.web_port)
 
 
 def _cmd_annotate_web(ns: argparse.Namespace) -> int:

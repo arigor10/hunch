@@ -130,7 +130,7 @@ def read_snapshot(replay_dir: Path) -> PanelSnapshot:
 # TUI app (textual, lazy-imported inside run())
 # ---------------------------------------------------------------------------
 
-def run(replay_dir: Path, poll_s: float = 1.0) -> int:
+def run(replay_dir: Path, poll_s: float = 1.0, web_port: int = 5556) -> int:
     """Launch the TUI. Blocks until the user quits."""
     try:
         from textual.app import App, ComposeResult
@@ -246,6 +246,7 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             Binding("b", "label_bad", "Bad"),
             Binding("s", "label_skip", "Skip"),
             Binding("e", "edit_hunch", "Edit"),
+            Binding("o", "open_in_browser", "Open"),
             Binding("a", "toggle_show_all", "Show all"),
             Binding("r", "refresh", "Refresh"),
             Binding("q", "quit", "Quit"),
@@ -254,10 +255,11 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
         show_all: reactive[bool] = reactive(False)
         snapshot: reactive[PanelSnapshot | None] = reactive(None)
 
-        def __init__(self, replay_dir: Path, poll_s: float) -> None:
+        def __init__(self, replay_dir: Path, poll_s: float, web_port: int = 5556) -> None:
             super().__init__()
             self.replay_dir = replay_dir
             self.poll_s = poll_s
+            self.web_port = web_port
             self.feedback_writer = FeedbackWriter(
                 feedback_path=replay_dir / "feedback.jsonl"
             )
@@ -274,6 +276,7 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
         def on_mount(self) -> None:
             self._refresh_snapshot()
             self.set_interval(self.poll_s, self._refresh_snapshot)
+            self._start_web_server()
 
         # -------- data refresh --------
 
@@ -429,6 +432,39 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
                 callback=_on_edit_result,
             )
 
+        def action_open_in_browser(self) -> None:
+            import webbrowser
+            table = self.query_one("#table", DataTable)
+            key = self._current_cursor_key(table)
+            url = f"http://localhost:{self.web_port}/"
+            if key:
+                url += f"#{key}"
+            webbrowser.open(url)
+            self.notify(f"opened {url}")
+
+        def _start_web_server(self) -> None:
+            import threading
+            try:
+                from hunch.annotate_web import create_app
+            except ImportError:
+                self.notify("flask not installed — web viewer disabled", severity="warning")
+                return
+            try:
+                flask_app = create_app(self.replay_dir, live=True)
+            except Exception as e:
+                self.notify(f"web server failed: {e}", severity="warning")
+                return
+            import logging
+            log = logging.getLogger("werkzeug")
+            log.setLevel(logging.ERROR)
+            t = threading.Thread(
+                target=flask_app.run,
+                kwargs={"host": "127.0.0.1", "port": self.web_port},
+                daemon=True,
+            )
+            t.start()
+            self.notify(f"context viewer: http://localhost:{self.web_port}")
+
         def _label_current(self, label: str) -> None:
             table = self.query_one("#table", DataTable)
             key = self._current_cursor_key(table)
@@ -444,7 +480,7 @@ def run(replay_dir: Path, poll_s: float = 1.0) -> int:
             self.notify(f"{key} → {label}")
             self._refresh_snapshot()
 
-    app = HunchPanel(replay_dir=replay_dir, poll_s=poll_s)
+    app = HunchPanel(replay_dir=replay_dir, poll_s=poll_s, web_port=web_port)
     try:
         # mouse=False: the panel has no click/scroll interactions and
         # leaked mouse-reporting escape sequences on abnormal exit
