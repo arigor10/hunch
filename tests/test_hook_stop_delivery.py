@@ -246,6 +246,49 @@ class TestFileLock:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()
 
+    def test_lock_released_when_process_dies(self, tmp_path):
+        """Kernel releases fcntl.flock when the holding process is killed."""
+        import fcntl
+        import signal
+        from hunch.hook.stop_delivery import _LOCK_FILENAME
+
+        replay = _setup_replay(tmp_path)
+        lock_path = replay / _LOCK_FILENAME
+
+        holder = subprocess.Popen(
+            [
+                "python3", "-c",
+                "import fcntl, time, sys; "
+                f"fd = open({str(lock_path)!r}, 'w'); "
+                "fcntl.flock(fd, fcntl.LOCK_EX); "
+                "sys.stdout.write('locked\\n'); sys.stdout.flush(); "
+                "time.sleep(3600)",
+            ],
+            stdout=subprocess.PIPE, text=True,
+        )
+        holder.stdout.readline()  # wait for "locked\n"
+
+        # Lock is held — a non-blocking acquire must fail
+        probe_fd = open(lock_path, "w")
+        try:
+            fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            probe_fd.close()
+            holder.kill()
+            holder.wait()
+            raise AssertionError("Lock was not held — test setup broken")
+        except OSError:
+            probe_fd.close()
+
+        # Kill the holder (SIGKILL — no cleanup possible)
+        holder.kill()
+        holder.wait()
+
+        # Lock should now be available
+        probe_fd = open(lock_path, "w")
+        fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # must not raise
+        fcntl.flock(probe_fd, fcntl.LOCK_UN)
+        probe_fd.close()
+
     def test_concurrent_subprocess_watchers_no_duplicate(self, tmp_path):
         """Three concurrent watchers: only one delivers, others exit or idle."""
         replay = _setup_replay(tmp_path)
