@@ -19,8 +19,12 @@ The UserPromptSubmit hook remains as a fallback for hunches approved in
 the brief gap between watcher exit and new watcher spawn.
 
 Concurrency: multiple watcher instances may be alive simultaneously
-(one per Stop event within the max_wait window). An exclusive file lock
-ensures only one watcher polls at a time; latecomers exit immediately.
+(one per Stop event). An exclusive file lock (``fcntl.flock``) ensures
+only one watcher polls at a time; latecomers exit immediately. The lock
+is process-scoped: the kernel releases it automatically when the process
+exits (for any reason — normal exit, crash, kill, OOM), so a dead
+watcher can never orphan the lock. No timeout — the watcher polls
+indefinitely until it delivers or the process dies.
 """
 
 from __future__ import annotations
@@ -36,22 +40,26 @@ from hunch.journal.feedback import read_hunch_edits, read_labeled_hunch_ids
 from hunch.journal.hunches import HunchesWriter, read_current_hunches
 
 POLL_INTERVAL_S = 5.0
-MAX_WAIT_S = 3600.0
 _LOCK_FILENAME = ".stop_delivery.lock"
 
 
 def handle_stop_delivery(
     replay_dir: Path,
     poll_interval: float = POLL_INTERVAL_S,
-    max_wait: float = MAX_WAIT_S,
 ) -> int:
     """Poll for approved hunches and deliver via asyncRewake.
 
-    Returns 0 if ``max_wait`` expires without finding hunches, or if
-    another watcher already holds the lock. A new watcher spawns on the
-    next Stop event, so exiting early is safe.
+    Returns 0 if another watcher already holds the lock (the existing
+    watcher is already polling — no need for two). A new watcher spawns
+    on the next Stop event, so conceding is safe.
 
     Returns 2 when hunches are delivered (triggers Claude rewake).
+
+    No timeout — the watcher polls indefinitely until it delivers or
+    the process is killed. ``fcntl.flock`` is process-scoped: the
+    kernel releases the lock automatically when the process exits
+    (for any reason), so a dead watcher can never hold the lock.
+    The next Stop event spawns a replacement.
 
     Never raises — errors are logged to stderr and the process exits
     cleanly so it doesn't crash Claude Code.
@@ -67,7 +75,7 @@ def handle_stop_delivery(
             return 0
 
         try:
-            return _poll_loop(replay_dir, poll_interval, max_wait)
+            return _poll_loop(replay_dir, poll_interval)
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()
@@ -76,9 +84,8 @@ def handle_stop_delivery(
         return 0
 
 
-def _poll_loop(replay_dir: Path, poll_interval: float, max_wait: float) -> int:
-    deadline = time.monotonic() + max_wait
-    while time.monotonic() < deadline:
+def _poll_loop(replay_dir: Path, poll_interval: float) -> int:
+    while True:
         try:
             deliverable = _find_deliverable(replay_dir)
         except Exception as exc:
@@ -94,7 +101,6 @@ def _poll_loop(replay_dir: Path, poll_interval: float, max_wait: float) -> int:
             return 2
 
         time.sleep(poll_interval)
-    return 0
 
 
 def _find_deliverable(replay_dir: Path):

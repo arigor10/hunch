@@ -240,7 +240,7 @@ class TestFileLock:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
         try:
-            rc = handle_stop_delivery(replay, poll_interval=0.01, max_wait=1.0)
+            rc = handle_stop_delivery(replay, poll_interval=0.01)
             assert rc == 0
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
