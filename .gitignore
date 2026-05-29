@@ -55,3 +55,6 @@ htmlcov/
 # Local logs / scratch
 *.log
 scratch/
+
+# Gemini/adversarial review notes (local, not part of the repo)
+docs/reviews/
