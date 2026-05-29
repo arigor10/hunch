@@ -236,7 +236,7 @@ def _records_to_events(
 
         if rec["type"] == "hunch_injection_raw":
             hunch_ids = _extract_hunch_ids(rec["text"])
-            hook = "stop_delivery" if "Stop hook" in rec["text"] else "user_prompt_submit"
+            hook = "async_delivery" if "Stop hook" in rec["text"] else "user_prompt_submit"
             events.append({
                 "type": "hunch_injection",
                 "timestamp": ts,

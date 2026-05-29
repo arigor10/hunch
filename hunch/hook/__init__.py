@@ -17,7 +17,7 @@ logic lives here so it can be unit-tested without shelling out.
 """
 
 from hunch.hook.stop import handle_stop
-from hunch.hook.stop_delivery import handle_stop_delivery
+from hunch.hook.async_delivery import handle_stop_delivery
 from hunch.hook.user_prompt_submit import handle_user_prompt_submit
 
 __all__ = ["handle_stop", "handle_stop_delivery", "handle_user_prompt_submit"]

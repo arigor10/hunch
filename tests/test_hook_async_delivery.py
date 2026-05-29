@@ -1,4 +1,4 @@
-"""Tests for the async stop-delivery hook handler."""
+"""Tests for the async delivery hook handler."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from hunch.critic.protocol import Hunch, TriggeringRefs
-from hunch.hook.stop_delivery import handle_stop_delivery, _find_deliverable
+from hunch.hook.async_delivery import handle_stop_delivery, _find_deliverable
 from hunch.journal.feedback import FeedbackWriter
 from hunch.journal.hunches import HunchesWriter, read_current_hunches
 
@@ -83,7 +83,7 @@ class TestFindDeliverable:
         _label_good(replay, hid)
         writer.write_status_change(
             hunch_id=hid, new_status="surfaced",
-            ts="2026-05-26T12:02:00Z", by="hook:stop_delivery",
+            ts="2026-05-26T12:02:00Z", by="hook:async_delivery",
         )
         assert _find_deliverable(replay) == []
 
@@ -125,7 +125,7 @@ class TestHandleStopDelivery:
         records = read_current_hunches(replay / "hunches.jsonl")
         assert len(records) == 1
         assert records[0].status == "surfaced"
-        assert records[0].history[0]["by"] == "hook:stop_delivery"
+        assert records[0].history[0]["by"] == "hook:async_delivery"
 
     def test_batches_multiple_hunches(self, tmp_path, capsys):
         replay = _setup_replay(tmp_path)
@@ -202,7 +202,7 @@ class TestHandleStopDelivery:
             _label_good(replay, hid)
             return original_find(replay_dir)
 
-        import hunch.hook.stop_delivery as mod
+        import hunch.hook.async_delivery as mod
         old = mod._find_deliverable
         mod._find_deliverable = _flaky
         try:
@@ -232,7 +232,7 @@ class TestFileLock:
     def test_second_watcher_exits_immediately(self, tmp_path):
         """Only one watcher polls at a time; latecomers exit 0."""
         import fcntl
-        from hunch.hook.stop_delivery import _LOCK_FILENAME
+        from hunch.hook.async_delivery import _LOCK_FILENAME
 
         replay = _setup_replay(tmp_path)
         lock_path = replay / _LOCK_FILENAME
@@ -250,7 +250,7 @@ class TestFileLock:
         """Kernel releases fcntl.flock when the holding process is killed."""
         import fcntl
         import signal
-        from hunch.hook.stop_delivery import _LOCK_FILENAME
+        from hunch.hook.async_delivery import _LOCK_FILENAME
 
         replay = _setup_replay(tmp_path)
         lock_path = replay / _LOCK_FILENAME
@@ -298,7 +298,7 @@ class TestFileLock:
 
         procs = [
             subprocess.Popen(
-                ["hunch", "hook", "stop-delivery", "--replay-dir", str(replay)],
+                ["hunch", "hook", "async-delivery", "--replay-dir", str(replay)],
                 stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
             )
             for _ in range(3)
@@ -331,7 +331,7 @@ class TestSubprocessIntegration:
         _label_good(replay, hid)
 
         result = subprocess.run(
-            ["hunch", "hook", "stop-delivery", "--replay-dir", str(replay)],
+            ["hunch", "hook", "async-delivery", "--replay-dir", str(replay)],
             capture_output=True, text=True, timeout=10,
         )
         assert result.returncode == 2
@@ -347,7 +347,7 @@ class TestSubprocessIntegration:
         writer = HunchesWriter(hunches_path=replay / "hunches.jsonl")
 
         proc = subprocess.Popen(
-            ["hunch", "hook", "stop-delivery", "--replay-dir", str(replay)],
+            ["hunch", "hook", "async-delivery", "--replay-dir", str(replay)],
             stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
         )
 
@@ -378,7 +378,7 @@ class TestInitRegistration:
                 )
 
         assert ("hunch hook stop", False) in commands
-        assert ("hunch hook stop-delivery", True) in commands
+        assert ("hunch hook async-delivery", True) in commands
 
     def test_init_idempotent_does_not_duplicate(self, tmp_path):
         from hunch.init import init_project
@@ -394,14 +394,14 @@ class TestInitRegistration:
             for hook in group["hooks"]:
                 all_commands.append(hook["command"])
 
-        assert all_commands.count("hunch hook stop-delivery") == 1
+        assert all_commands.count("hunch hook async-delivery") == 1
 
 
 # ---------------------------------------------------------------------------
 # E2E test — runs a real Claude Haiku call to verify hooks fire.
 #
 # Skipped by default. Run with:
-#   pytest tests/test_hook_stop_delivery.py -k e2e --run-e2e -v
+#   pytest tests/test_hook_async_delivery.py -k e2e --run-e2e -v
 #
 # Tests the UserPromptSubmit delivery path end-to-end (hooks fire,
 # hunch is surfaced, Claude sees the injection context).
@@ -499,8 +499,8 @@ class TestHookDeliveryE2E:
         settings = json.loads(settings_path.read_text())
         for group in settings["hooks"]["Stop"]:
             for hook in group["hooks"]:
-                if "stop-delivery" in hook.get("command", ""):
-                    hook["command"] = "timeout 10 hunch hook stop-delivery"
+                if "async-delivery" in hook.get("command", ""):
+                    hook["command"] = "timeout 10 hunch hook async-delivery"
         settings_path.write_text(json.dumps(settings, indent=2))
 
         result = subprocess.run(
@@ -541,7 +541,7 @@ class TestHookDeliveryE2E:
         3. Stop fires → async watcher starts polling
         4. From another thread, approve the hunch
         5. Watcher finds it → exits code 2 → Claude wakes up
-        6. Hunch should be surfaced by hook:stop_delivery
+        6. Hunch should be surfaced by hook:async_delivery
         """
         project_dir = tmp_path / "e2e_project_async"
         project_dir.mkdir()
@@ -557,14 +557,14 @@ class TestHookDeliveryE2E:
         writer = HunchesWriter(hunches_path=replay / "hunches.jsonl")
         hid = _emit(writer, "async rewake smell", "Should be delivered via asyncRewake.")
 
-        # Short timeout on stop-delivery so the second watcher
+        # Short timeout on async-delivery so the second watcher
         # (after rewake) exits quickly
         settings_path = project_dir / ".claude" / "settings.local.json"
         settings = json.loads(settings_path.read_text())
         for group in settings["hooks"]["Stop"]:
             for hook in group["hooks"]:
-                if "stop-delivery" in hook.get("command", ""):
-                    hook["command"] = "timeout 20 hunch hook stop-delivery"
+                if "async-delivery" in hook.get("command", ""):
+                    hook["command"] = "timeout 20 hunch hook async-delivery"
         settings_path.write_text(json.dumps(settings, indent=2))
 
         # Start claude -p non-blocking
@@ -606,7 +606,7 @@ class TestHookDeliveryE2E:
             f"Statuses: {[r.status for r in records]}"
         )
         assert surfaced[0].hunch_id == hid
-        assert surfaced[0].history[0]["by"] == "hook:stop_delivery"
+        assert surfaced[0].history[0]["by"] == "hook:async_delivery"
 
         assert hid in stdout, (
             f"Expected {hid} in Claude's response, got: {stdout[:500]}"

@@ -191,7 +191,7 @@ def _surface_hunch(replay: Path, hid: str) -> None:
     writer = HunchesWriter(hunches_path=replay / "hunches.jsonl")
     writer.write_status_change(
         hunch_id=hid, new_status="surfaced",
-        ts="2026-04-14T12:02:00Z", by="hook:stop_delivery",
+        ts="2026-04-14T12:02:00Z", by="hook:async_delivery",
     )
 
 

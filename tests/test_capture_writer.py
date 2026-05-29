@@ -306,7 +306,7 @@ def test_hunch_injection_written_to_conversation(tmp_path):
                 "type": "hunch_injection",
                 "timestamp": "2026-05-28T03:05:00Z",
                 "hunch_ids": ["h-0003"],
-                "delivery_hook": "stop_delivery",
+                "delivery_hook": "async_delivery",
             },
         ],
         project_roots=[],

@@ -284,7 +284,7 @@ def test_hunch_injection_detected_from_queue_operation(transcript_factory, proje
     injections = [e for e in events if e["type"] == "hunch_injection"]
     assert len(injections) == 1
     assert injections[0]["hunch_ids"] == ["h-0003"]
-    assert injections[0]["delivery_hook"] == "stop_delivery"
+    assert injections[0]["delivery_hook"] == "async_delivery"
 
 
 def test_hunch_injection_detected_from_attachment(transcript_factory, project_root):

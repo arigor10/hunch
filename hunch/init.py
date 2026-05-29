@@ -32,7 +32,7 @@ from typing import Any
 
 UPS_HOOK_COMMAND = "hunch hook user-prompt-submit"
 STOP_HOOK_COMMAND = "hunch hook stop"
-STOP_DELIVERY_HOOK_COMMAND = "hunch hook stop-delivery"
+STOP_DELIVERY_HOOK_COMMAND = "hunch hook async-delivery"
 
 
 # ---------------------------------------------------------------------------

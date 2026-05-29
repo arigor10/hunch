@@ -75,7 +75,7 @@ These are the interface-level commitments we take to the bank. Everything in v0 
 3. **Each Critic tick carries `(full_snapshot_bookmark, delta_bookmark)`.** The Critic either re-reads full or reads only since-bookmark. The framework doesn't care which.
 4. **All replay-buffer JSONL files are strictly append-only.** This includes `hunches.jsonl`: a hunch's lifecycle (pending → surfaced → suppressed, etc.) is represented as a sequence of *status-change event* entries appended by whoever changes status. Current state is computed by folding events. No in-place mutation anywhere; every consumer (side panel, hook, future agentic Critic, future analytics) reads the same files and gets a full audit trail for free.
 5. **Surface is file-triggered, not call-triggered.** Anything that wants to display, inject, or react to a hunch reads `hunches.jsonl` and `feedback.jsonl`. This lets v0's side panel, v0.5's PreToolUse hook, and v1's Stop hook all coexist and all consume the same data.
-6. **Three hooks wire the framework into Claude Code.** The `UserPromptSubmit` hook injects approved hunches into the Researcher's context (fallback path). The `Stop` hook appends `claude_stopped` events to enable the trigger. The `asyncRewake` Stop hook (`stop-delivery`) polls for approved hunches and delivers them automatically without requiring a Scientist message (primary delivery path). All three are thin file readers/writers over the replay buffer.
+6. **Three hooks wire the framework into Claude Code.** The `UserPromptSubmit` hook injects approved hunches into the Researcher's context (fallback path). The `Stop` hook appends `claude_stopped` events to enable the trigger. The `asyncRewake` Stop hook (`async-delivery`) polls for approved hunches and delivers them automatically without requiring a Scientist message (primary delivery path). All three are thin file readers/writers over the replay buffer.
 7. **Config is layered: required-interface < auto-discovery < `hunch init` scaffolding.** Zero-config usage must be possible for common layouts; opinionated scaffolding is optional.
 
 8. **Both online and offline modes are resumable.** After each Critic tick, the framework writes a `checkpoint.json` recording how far the pipeline has progressed. On restart, it resumes from the checkpoint rather than reprocessing the entire transcript. This applies symmetrically to `hunch run` (online) and `hunch replay-offline` (offline eval).
@@ -105,7 +105,7 @@ If we're ever tempted to violate one of these to save time in v0, stop and rethi
   "type": "hunch_injection",
   "timestamp": "2026-05-28T03:05:56Z",
   "hunch_ids": ["h-0003"],
-  "delivery_hook": "stop_delivery" | "user_prompt_submit"
+  "delivery_hook": "async_delivery" | "user_prompt_submit"
 }
 ```
 
@@ -219,7 +219,7 @@ All four keybindings can fire regardless of which pane has focus — the Scienti
 
 **Injection mechanism (v0):** Two delivery paths, both reading `hunches.jsonl` + `feedback.jsonl` for hunches whose folded status is `pending` AND whose latest explicit label is `good`:
 
-- **Async delivery (primary):** An `asyncRewake` Stop hook (`hunch hook stop-delivery`) spawns as a background process after each Claude response. It polls every 5 seconds for approved hunches. When found, it formats them as a `<hunch-injection>` block, marks them `surfaced`, writes the block to stderr, and exits with code 2 — causing Claude Code to wake up and show the injection as a system message. This delivers hunches without the Scientist needing to send a message.
+- **Async delivery (primary):** An `asyncRewake` Stop hook (`hunch hook async-delivery`) spawns as a background process after each Claude response. It polls every 5 seconds for approved hunches. When found, it formats them as a `<hunch-injection>` block, marks them `surfaced`, writes the block to stderr, and exits with code 2 — causing Claude Code to wake up and show the injection as a system message. This delivers hunches without the Scientist needing to send a message.
 
   **Concurrency model:** Each Stop event spawns a new watcher process. An exclusive file lock (`fcntl.flock(LOCK_EX | LOCK_NB)`) ensures only one watcher polls at a time — latecomers see the lock is held and exit immediately (return 0). The lock is process-scoped: the kernel releases it automatically when the process exits for any reason (normal exit, crash, kill, OOM), so a dead watcher can never orphan the lock. No timeout — the watcher polls indefinitely until it delivers or its process dies. The next Stop event spawns a replacement if the previous watcher died. This means the watcher survives arbitrarily long Claude responses or idle periods; the Scientist can press `g` in the TUI hours after the last Claude response and the hunch will be delivered within 5 seconds.
 - **UserPromptSubmit (fallback):** A synchronous `UserPromptSubmit` hook checks for approved hunches on each Scientist message, catching anything the async watcher missed (e.g., hunches approved in the brief gap between watcher exit and new watcher spawn).
@@ -230,7 +230,7 @@ Both paths format the injection identically and mark hunches as `surfaced` in `h
 - Side panel reads `hunches.jsonl` (folding events to derive current status); writes to `feedback.jsonl` and appends status-change events to `hunches.jsonl` (e.g. `{type: "status_change", hunch_id, new_status: "suppressed", by: "scientist_key"}`).
 - Stop hook appends `{"type": "claude_stopped", "tick_seq": N, "timestamp": ...}` to `conversation.jsonl` when Claude finishes a turn.
 - UserPromptSubmit hook reads `hunches.jsonl` + `feedback.jsonl`, prepends hunches that are pending AND labeled `good`, and appends a status-change event (`new_status: "surfaced"`). Fallback for the async delivery hook.
-- Async Stop hook (`stop-delivery`) polls for approved hunches every 5 seconds and delivers them via `asyncRewake` (exit code 2). Primary delivery path — delivers without requiring a Scientist message.
+- Async Stop hook (`async-delivery`) polls for approved hunches every 5 seconds and delivers them via `asyncRewake` (exit code 2). Primary delivery path — delivers without requiring a Scientist message.
 - Neither the side panel nor the hooks ever talk directly to the Critic — they only read/write files.
 
 **Additional CLI subcommands (beyond the side panel):**
@@ -377,7 +377,7 @@ Keeps every future injection mechanism (side panel, UserPromptSubmit, PreToolUse
 Explicit gives clean labels for the learning loop; implicit captures *how* the Scientist acted on the hunch (often richer). Both feed the mentorship loop later.
 
 **D7: Approval gate — only `good`-labeled hunches are injected.**
-UX correctness: hunches must be explicitly approved by the Scientist before they reach the Researcher. Both delivery hooks (async stop-delivery and UserPromptSubmit fallback) check the folded hunch status (`pending`) and the explicit label in `feedback.jsonl` (`good`). This ensures the Scientist triages hunches in the side panel before injection, and builds the label bank as a natural byproduct. `bad` and `skip` labels suppress injection; unlabeled hunches stay pending.
+UX correctness: hunches must be explicitly approved by the Scientist before they reach the Researcher. Both delivery hooks (async async-delivery and UserPromptSubmit fallback) check the folded hunch status (`pending`) and the explicit label in `feedback.jsonl` (`good`). This ensures the Scientist triages hunches in the side panel before injection, and builds the label bank as a natural byproduct. `bad` and `skip` labels suppress injection; unlabeled hunches stay pending.
 
 **D8: Tmux cross-pane keybindings with `send-keys`.**
 Lets the Scientist control the side panel (good/bad/skip/inject) without leaving the main terminal. `send-keys` is tmux-native and cross-OS. The `Alt-i` (inject-now) key uses `send-keys Enter` to trigger a turn on the Researcher with no additional input, leveraging the UserPromptSubmit hook to prepend the hunch — elegant reuse of the injection mechanism.
@@ -432,7 +432,7 @@ Depends on the Critic v0 being *implementable* (not polished) before step 11 —
 
 Surfaced during the 2026-04-14 adversarial review and downstream design conversation. Listed here rather than silently letting them rot in review notes.
 
-**Q1: Autonomous-interject path.** ~~The `UserPromptSubmit` hook fires only when the Scientist types. If the Researcher enters a long autonomous stretch, hunches queue and become post-mortem.~~ **Resolved:** The `asyncRewake` Stop hook (`stop-delivery`) now delivers approved hunches automatically within ~5 seconds of approval, without the Scientist needing to type. The watcher polls indefinitely (no timeout), so hunches can be approved hours after the last Claude response and still be delivered promptly.
+**Q1: Autonomous-interject path.** ~~The `UserPromptSubmit` hook fires only when the Scientist types. If the Researcher enters a long autonomous stretch, hunches queue and become post-mortem.~~ **Resolved:** The `asyncRewake` Stop hook (`async-delivery`) now delivers approved hunches automatically within ~5 seconds of approval, without the Scientist needing to type. The watcher polls indefinitely (no timeout), so hunches can be approved hours after the last Claude response and still be delivered promptly.
 
 Remaining open question: hunches are still *approval-gated* — the Scientist must label `good` before delivery. If the Scientist is genuinely away and hunches pile up, they still queue. The transition from "Scientist-gated" to "autonomous interject" (removing the approval gate for high-confidence hunches) remains a future decision.
 
@@ -510,7 +510,7 @@ Contract test (`tests/test_journal_concurrency.py`) verifies: valid JSON on ever
   "hunch_id": "h-0007",
   "ts": "2026-04-14T10:24:02Z",
   "new_status": "surfaced" | "suppressed" | ...,
-  "by": "scientist_key:alt_g" | "hook:user_prompt_submit" | "hook:stop_delivery" | ...
+  "by": "scientist_key:alt_g" | "hook:user_prompt_submit" | "hook:async_delivery" | ...
 }
 ```
 

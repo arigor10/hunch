@@ -1,4 +1,4 @@
-"""Async Stop hook — auto-delivers approved hunches without a user message.
+"""Async delivery hook — auto-delivers approved hunches without a user message.
 
 Registered as an ``asyncRewake`` Stop hook. Runs in the background after
 each Claude response, polling feedback.jsonl for newly-approved hunches.
@@ -40,7 +40,7 @@ from hunch.journal.feedback import read_hunch_edits, read_labeled_hunch_ids
 from hunch.journal.hunches import HunchesWriter, read_current_hunches
 
 POLL_INTERVAL_S = 5.0
-_LOCK_FILENAME = ".stop_delivery.lock"
+_LOCK_FILENAME = ".async_delivery.lock"
 
 
 def handle_stop_delivery(
@@ -80,7 +80,7 @@ def handle_stop_delivery(
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()
     except Exception as exc:
-        print(f"[hunch stop-delivery] error: {exc}", file=sys.stderr)
+        print(f"[hunch async-delivery] error: {exc}", file=sys.stderr)
         return 0
 
 
@@ -89,7 +89,7 @@ def _poll_loop(replay_dir: Path, poll_interval: float) -> int:
         try:
             deliverable = _find_deliverable(replay_dir)
         except Exception as exc:
-            print(f"[hunch stop-delivery] transient error: {exc}", file=sys.stderr)
+            print(f"[hunch async-delivery] transient error: {exc}", file=sys.stderr)
             time.sleep(poll_interval)
             continue
 
@@ -124,7 +124,7 @@ def _mark_surfaced(replay_dir: Path, hunches) -> None:
             hunch_id=r.hunch_id,
             new_status="surfaced",
             ts=ts,
-            by="hook:stop_delivery",
+            by="hook:async_delivery",
         )
 
 
@@ -133,10 +133,10 @@ def _utc_now_iso() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Invoked as ``hunch hook stop-delivery``."""
+    """Invoked as ``hunch hook async-delivery``."""
     import argparse
 
-    parser = argparse.ArgumentParser(prog="hunch hook stop-delivery")
+    parser = argparse.ArgumentParser(prog="hunch hook async-delivery")
     parser.add_argument(
         "--replay-dir",
         type=Path,

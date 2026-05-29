@@ -78,7 +78,7 @@ def format_hunch_injection(
     original for any hunch that was edited before approval.
 
     Shared by both the UserPromptSubmit hook (additionalContext) and
-    the stop-delivery hook (asyncRewake stderr).
+    the async-delivery hook (asyncRewake stderr).
     """
     edits = edits or {}
     lines = [
