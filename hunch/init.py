@@ -32,6 +32,7 @@ from typing import Any
 
 UPS_HOOK_COMMAND = "hunch hook user-prompt-submit"
 STOP_HOOK_COMMAND = "hunch hook stop"
+STOP_DELIVERY_HOOK_COMMAND = "hunch hook async-delivery"
 
 
 # ---------------------------------------------------------------------------
@@ -100,14 +101,15 @@ def init_project(cwd: Path) -> InitResult:
 # Internals
 # ---------------------------------------------------------------------------
 
-_HOOKS_TO_REGISTER: list[tuple[str, str]] = [
-    ("UserPromptSubmit", UPS_HOOK_COMMAND),
-    ("Stop", STOP_HOOK_COMMAND),
+_HOOKS_TO_REGISTER: list[tuple[str, str, dict[str, Any]]] = [
+    ("UserPromptSubmit", UPS_HOOK_COMMAND, {}),
+    ("Stop", STOP_HOOK_COMMAND, {}),
+    ("Stop", STOP_DELIVERY_HOOK_COMMAND, {"asyncRewake": True}),
 ]
 
 
 def _merge_hooks(settings_path: Path) -> tuple[bool, list[str]]:
-    """Ensure both hooks are present in the settings file.
+    """Ensure all hooks are present in the settings file.
 
     Returns `(file_created, list_of_hook_names_added)`.
     """
@@ -134,14 +136,14 @@ def _merge_hooks(settings_path: Path) -> tuple[bool, list[str]]:
         )
 
     added: list[str] = []
-    for hook_name, command in _HOOKS_TO_REGISTER:
+    for hook_name, command, extra in _HOOKS_TO_REGISTER:
         hook_list = hooks.setdefault(hook_name, [])
         if not isinstance(hook_list, list):
             raise RuntimeError(
                 f"{settings_path}: 'hooks.{hook_name}' is not an array"
             )
         if not _hook_already_present(hook_list, command):
-            hook_list.append(_hunch_hook_entry(command))
+            hook_list.append(_hunch_hook_entry(command, **extra))
             added.append(hook_name)
 
     if added:
@@ -162,24 +164,19 @@ def _hook_already_present(hook_list: list[Any], command: str) -> bool:
     return False
 
 
-def _hunch_hook_entry(command: str) -> dict[str, Any]:
-    return {
-        "hooks": [
-            {
-                "type": "command",
-                "command": command,
-            }
-        ]
-    }
+def _hunch_hook_entry(command: str, **extra: Any) -> dict[str, Any]:
+    hook: dict[str, Any] = {"type": "command", "command": command}
+    hook.update(extra)
+    return {"hooks": [hook]}
 
 
 def _minimal_settings() -> dict[str, Any]:
-    return {
-        "hooks": {
-            hook_name: [_hunch_hook_entry(command)]
-            for hook_name, command in _HOOKS_TO_REGISTER
-        },
-    }
+    settings: dict[str, Any] = {"hooks": {}}
+    for hook_name, command, extra in _HOOKS_TO_REGISTER:
+        settings["hooks"].setdefault(hook_name, []).append(
+            _hunch_hook_entry(command, **extra)
+        )
+    return settings
 
 
 def _write_settings(settings_path: Path, settings: dict[str, Any]) -> None:

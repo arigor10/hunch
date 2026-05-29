@@ -41,3 +41,6 @@ exclude = ["tests*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+    "e2e: end-to-end tests requiring claude CLI and network (run with --run-e2e)",
+]

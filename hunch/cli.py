@@ -141,6 +141,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="seconds between replay-buffer refreshes (default: 1)",
     )
+    pnl.add_argument(
+        "--web-port",
+        type=int,
+        default=5556,
+        help="port for the live context web viewer (default: 5556)",
+    )
 
     rpo = sub.add_parser(
         "replay-offline",
@@ -421,6 +427,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Stop hook — append claude_stopped event to conversation.jsonl",
     )
     stop_hook.add_argument(
+        "--replay-dir",
+        type=Path,
+        default=None,
+        help="replay-buffer directory (default: .hunch/replay/ under cwd)",
+    )
+    async_delivery = hook_sub.add_parser(
+        "async-delivery",
+        help="Async delivery hook — poll for approved hunches and deliver via rewake",
+    )
+    async_delivery.add_argument(
         "--replay-dir",
         type=Path,
         default=None,
@@ -1283,7 +1299,7 @@ def _cmd_panel(ns: argparse.Namespace) -> int:
 
     replay_dir = _resolved_replay_dir(ns.replay_dir)
     replay_dir.mkdir(parents=True, exist_ok=True)
-    return panel_run(replay_dir=replay_dir, poll_s=ns.poll)
+    return panel_run(replay_dir=replay_dir, poll_s=ns.poll, web_port=ns.web_port)
 
 
 def _cmd_annotate_web(ns: argparse.Namespace) -> int:
@@ -1319,6 +1335,12 @@ def _cmd_hook(ns: argparse.Namespace) -> int:
         if ns.replay_dir is not None:
             argv.extend(["--replay-dir", str(ns.replay_dir)])
         return stop_main(argv)
+    if ns.hook_name == "async-delivery":
+        from hunch.hook.async_delivery import main as sd_main
+        argv = []
+        if ns.replay_dir is not None:
+            argv.extend(["--replay-dir", str(ns.replay_dir)])
+        return sd_main(argv)
     sys.stderr.write(f"hunch hook: unknown hook '{ns.hook_name}'\n")
     return 2
 

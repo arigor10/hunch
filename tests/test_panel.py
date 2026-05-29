@@ -11,7 +11,7 @@ from hunch.critic.protocol import Hunch, TriggeringRefs
 from hunch.journal.feedback import FeedbackWriter
 from hunch.journal.hunches import HunchesWriter
 from hunch.capture.writer import ReplayBufferWriter
-from hunch.panel import PanelSnapshot, read_max_tick_seq, read_snapshot
+from hunch.panel import PanelSnapshot, display_status, read_max_tick_seq, read_snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +33,69 @@ def _emit(writer: HunchesWriter, smell: str, description: str = "") -> str:
         bookmark_now=1,
     )
     return hid
+
+
+# ---------------------------------------------------------------------------
+# display_status
+# ---------------------------------------------------------------------------
+
+def test_display_status_pending_no_label(tmp_path):
+    w = HunchesWriter(hunches_path=tmp_path / "hunches.jsonl")
+    _emit(w, "smell A")
+    snap = read_snapshot(tmp_path)
+    assert snap.display_status_for("h-0001", snap.records[0]) == "pending"
+
+
+def test_display_status_approved(tmp_path):
+    w = HunchesWriter(hunches_path=tmp_path / "hunches.jsonl")
+    _emit(w, "smell A")
+    fb = FeedbackWriter(feedback_path=tmp_path / "feedback.jsonl")
+    fb.write_explicit("h-0001", "good", "2026-04-14T12:05:00Z")
+    snap = read_snapshot(tmp_path)
+    assert snap.display_status_for("h-0001", snap.records[0]) == "approved"
+
+
+def test_display_status_delivered(tmp_path):
+    w = HunchesWriter(hunches_path=tmp_path / "hunches.jsonl")
+    _emit(w, "smell A")
+    w.write_status_change(
+        hunch_id="h-0001", new_status="surfaced",
+        ts="2026-04-14T12:10:00Z", by="hook:async_delivery",
+    )
+    snap = read_snapshot(tmp_path)
+    assert snap.display_status_for("h-0001", snap.records[0]) == "delivered"
+
+
+def test_display_status_dismissed(tmp_path):
+    w = HunchesWriter(hunches_path=tmp_path / "hunches.jsonl")
+    _emit(w, "smell A")
+    fb = FeedbackWriter(feedback_path=tmp_path / "feedback.jsonl")
+    fb.write_explicit("h-0001", "bad", "2026-04-14T12:05:00Z")
+    snap = read_snapshot(tmp_path)
+    assert snap.display_status_for("h-0001", snap.records[0]) == "dismissed"
+
+
+def test_display_status_skipped(tmp_path):
+    w = HunchesWriter(hunches_path=tmp_path / "hunches.jsonl")
+    _emit(w, "smell A")
+    fb = FeedbackWriter(feedback_path=tmp_path / "feedback.jsonl")
+    fb.write_explicit("h-0001", "skip", "2026-04-14T12:05:00Z")
+    snap = read_snapshot(tmp_path)
+    assert snap.display_status_for("h-0001", snap.records[0]) == "skipped"
+
+
+def test_display_status_delivered_overrides_label(tmp_path):
+    """Once surfaced, display status is 'delivered' regardless of label."""
+    w = HunchesWriter(hunches_path=tmp_path / "hunches.jsonl")
+    _emit(w, "smell A")
+    fb = FeedbackWriter(feedback_path=tmp_path / "feedback.jsonl")
+    fb.write_explicit("h-0001", "good", "2026-04-14T12:05:00Z")
+    w.write_status_change(
+        hunch_id="h-0001", new_status="surfaced",
+        ts="2026-04-14T12:10:00Z", by="hook:async_delivery",
+    )
+    snap = read_snapshot(tmp_path)
+    assert snap.display_status_for("h-0001", snap.records[0]) == "delivered"
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +139,29 @@ def test_read_snapshot_reflects_status_change(tmp_path):
 # PanelSnapshot.visible
 # ---------------------------------------------------------------------------
 
-def test_visible_hides_labeled_by_default(tmp_path):
+def test_visible_shows_only_active_by_default(tmp_path):
+    """Default view shows pending + approved, hides dismissed/delivered/skipped."""
+    w = HunchesWriter(hunches_path=tmp_path / "hunches.jsonl")
+    _emit(w, "smell A")  # h-0001 -> pending (no label)
+    _emit(w, "smell B")  # h-0002 -> dismissed (labeled bad)
+    _emit(w, "smell C")  # h-0003 -> approved (labeled good, still pending)
+    _emit(w, "smell D")  # h-0004 -> delivered (surfaced)
+    _emit(w, "smell E")  # h-0005 -> skipped
+    fb = FeedbackWriter(feedback_path=tmp_path / "feedback.jsonl")
+    fb.write_explicit("h-0002", "bad", "2026-04-14T12:05:00Z")
+    fb.write_explicit("h-0003", "good", "2026-04-14T12:06:00Z")
+    fb.write_explicit("h-0005", "skip", "2026-04-14T12:07:00Z")
+    w.write_status_change(
+        hunch_id="h-0004", new_status="surfaced",
+        ts="2026-04-14T12:08:00Z", by="hook:async_delivery",
+    )
+
+    snap = read_snapshot(tmp_path)
+    visible = snap.visible(show_all=False)
+    assert [r.hunch_id for r in visible] == ["h-0001", "h-0003"]
+
+
+def test_visible_all_includes_everything(tmp_path):
     w = HunchesWriter(hunches_path=tmp_path / "hunches.jsonl")
     _emit(w, "smell A")
     _emit(w, "smell B")
@@ -84,19 +169,7 @@ def test_visible_hides_labeled_by_default(tmp_path):
     fb.write_explicit("h-0001", "bad", "2026-04-14T12:05:00Z")
 
     snap = read_snapshot(tmp_path)
-    visible = snap.visible(show_labeled=False)
-    assert [r.hunch_id for r in visible] == ["h-0002"]
-
-
-def test_visible_all_includes_labeled(tmp_path):
-    w = HunchesWriter(hunches_path=tmp_path / "hunches.jsonl")
-    _emit(w, "smell A")
-    _emit(w, "smell B")
-    fb = FeedbackWriter(feedback_path=tmp_path / "feedback.jsonl")
-    fb.write_explicit("h-0001", "bad", "2026-04-14T12:05:00Z")
-
-    snap = read_snapshot(tmp_path)
-    visible = snap.visible(show_labeled=True)
+    visible = snap.visible(show_all=True)
     assert [r.hunch_id for r in visible] == ["h-0001", "h-0002"]
 
 
@@ -104,7 +177,7 @@ def test_visible_returns_independent_list(tmp_path):
     w = HunchesWriter(hunches_path=tmp_path / "hunches.jsonl")
     _emit(w, "smell A")
     snap = read_snapshot(tmp_path)
-    out = snap.visible(show_labeled=True)
+    out = snap.visible(show_all=True)
     out.clear()
     # snap.records should not have been mutated.
     assert len(snap.records) == 1
@@ -114,11 +187,12 @@ def test_visible_returns_independent_list(tmp_path):
 # PanelSnapshot.counts
 # ---------------------------------------------------------------------------
 
-def test_counts_distinguish_pending_surfaced_labeled(tmp_path):
+def test_counts_distinguish_display_statuses(tmp_path):
     w = HunchesWriter(hunches_path=tmp_path / "hunches.jsonl")
     _emit(w, "smell A")  # h-0001 -> stays pending
-    _emit(w, "smell B")  # h-0002 -> will be surfaced
-    _emit(w, "smell C")  # h-0003 -> will be labeled (still pending status-wise)
+    _emit(w, "smell B")  # h-0002 -> delivered (surfaced)
+    _emit(w, "smell C")  # h-0003 -> approved (labeled good, still pending)
+    _emit(w, "smell D")  # h-0004 -> dismissed (labeled bad)
     w.write_status_change(
         hunch_id="h-0002",
         new_status="surfaced",
@@ -127,15 +201,16 @@ def test_counts_distinguish_pending_surfaced_labeled(tmp_path):
     )
     fb = FeedbackWriter(feedback_path=tmp_path / "feedback.jsonl")
     fb.write_explicit("h-0003", "good", "2026-04-14T12:15:00Z")
+    fb.write_explicit("h-0004", "bad", "2026-04-14T12:16:00Z")
 
     snap = read_snapshot(tmp_path)
     counts = snap.counts()
-    assert counts == {"pending": 2, "surfaced": 1, "labeled": 1}
+    assert counts == {"pending": 1, "delivered": 1, "approved": 1, "dismissed": 1}
 
 
 def test_counts_empty_snapshot():
     snap = PanelSnapshot(records=[], labels={})
-    assert snap.counts() == {"pending": 0, "surfaced": 0, "labeled": 0}
+    assert snap.counts() == {}
 
 
 # ---------------------------------------------------------------------------

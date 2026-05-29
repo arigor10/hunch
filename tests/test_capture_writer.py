@@ -290,3 +290,55 @@ def test_poll_once_end_to_end(transcript_factory, tmp_path):
     assert state2.line_offset == 2
     conv_after = _read_jsonl(writer.conversation_path)
     assert len(conv_after) == 2  # No duplicate entries.
+
+
+# ---------------------------------------------------------------------------
+# Hunch injection + response events
+# ---------------------------------------------------------------------------
+
+
+def test_hunch_injection_written_to_conversation(tmp_path):
+    """A hunch_injection event is written to conversation.jsonl."""
+    writer = ReplayBufferWriter(replay_dir=tmp_path / "replay")
+    writer.append_events(
+        [
+            {
+                "type": "hunch_injection",
+                "timestamp": "2026-05-28T03:05:00Z",
+                "hunch_ids": ["h-0003"],
+                "delivery_hook": "async_delivery",
+            },
+        ],
+        project_roots=[],
+    )
+    conv = _read_jsonl(writer.conversation_path)
+    assert len(conv) == 1
+    assert conv[0]["type"] == "hunch_injection"
+    assert conv[0]["hunch_ids"] == ["h-0003"]
+    assert conv[0]["tick_seq"] == 1
+
+
+def test_hunch_response_written_to_conversation_and_feedback(tmp_path):
+    """A hunch_response event goes to both conversation.jsonl and feedback.jsonl."""
+    writer = ReplayBufferWriter(replay_dir=tmp_path / "replay")
+    writer.append_events(
+        [
+            {
+                "type": "hunch_response",
+                "timestamp": "2026-05-28T04:00:00Z",
+                "hunch_id": "h-0003",
+                "response_text": "Stale numbers, corrected.",
+            },
+        ],
+        project_roots=[],
+    )
+    conv = _read_jsonl(writer.conversation_path)
+    assert len(conv) == 1
+    assert conv[0]["type"] == "hunch_response"
+    assert conv[0]["hunch_id"] == "h-0003"
+
+    feedback = _read_jsonl(tmp_path / "replay" / "feedback.jsonl")
+    assert len(feedback) == 1
+    assert feedback[0]["channel"] == "response"
+    assert feedback[0]["hunch_id"] == "h-0003"
+    assert feedback[0]["response_text"] == "Stale numbers, corrected."

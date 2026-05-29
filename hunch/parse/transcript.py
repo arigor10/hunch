@@ -134,6 +134,9 @@ def _is_project_md(path: str, project_roots: Iterable[str]) -> bool:
 _FIGURE_CMD_PREFIX = re.compile(r"(PYTHONPATH=\S+\s+)?(python3?|set\s)")
 _FIGURE_CMD_KEYWORDS = re.compile(r"plot|savefig|pareto|\.png", re.IGNORECASE)
 
+_HUNCH_RESPONSE_RE = re.compile(r"Re (h-\d{4}):\s*(.+)")
+_HUNCH_INJECTION_RE = re.compile(r"<hunch-injection>")
+
 
 def _is_figure_command(cmd: str) -> bool:
     """Does this Bash command likely produce a figure?"""
@@ -165,6 +168,26 @@ def _parse_lines_to_records(lines: Iterable[str], starting_line_num: int = 0) ->
             continue
 
         rec_type = d.get("type")
+
+        # Detect hunch injection events (delivered via asyncRewake or UPS).
+        # These appear as queue-operation or attachment records containing
+        # <hunch-injection> in their content/prompt.
+        if rec_type in ("queue-operation", "attachment"):
+            payload = d.get("content", "") or ""
+            if not payload:
+                att = d.get("attachment", {})
+                payload = att.get("prompt", "") if isinstance(att, dict) else ""
+            if _HUNCH_INJECTION_RE.search(payload):
+                records.append({
+                    "line": starting_line_num + offset,
+                    "type": "hunch_injection_raw",
+                    "timestamp": d.get("timestamp", ""),
+                    "text": payload,
+                    "tool_calls": [],
+                    "tool_results": [],
+                })
+            continue
+
         if rec_type not in ("user", "assistant"):
             continue
 
@@ -211,6 +234,17 @@ def _records_to_events(
     for rec in records:
         ts = rec["timestamp"]
 
+        if rec["type"] == "hunch_injection_raw":
+            hunch_ids = _extract_hunch_ids(rec["text"])
+            hook = "async_delivery" if "Stop hook" in rec["text"] else "user_prompt_submit"
+            events.append({
+                "type": "hunch_injection",
+                "timestamp": ts,
+                "hunch_ids": hunch_ids,
+                "delivery_hook": hook,
+            })
+            continue
+
         if rec["type"] == "assistant":
             for tc in rec["tool_calls"]:
                 name = tc["name"]
@@ -245,6 +279,13 @@ def _records_to_events(
                     "timestamp": ts,
                     "text": text,
                 })
+                for m in _HUNCH_RESPONSE_RE.finditer(text):
+                    events.append({
+                        "type": "hunch_response",
+                        "timestamp": ts,
+                        "hunch_id": m.group(1),
+                        "response_text": m.group(2).strip(),
+                    })
 
         elif rec["type"] == "user":
             for tr in rec["tool_results"]:
@@ -268,6 +309,19 @@ def _records_to_events(
             })
 
     return events
+
+
+def _extract_hunch_ids(text: str) -> list[str]:
+    """Extract hunch IDs (e.g. ``h-0003``) from a hunch-injection block.
+
+    Scoped to the ``<hunch-injection>...</hunch-injection>`` region to
+    avoid picking up IDs from ``<hunch-reminder>`` blocks that may be
+    bundled in the same payload.
+    """
+    m = re.search(r"<hunch-injection>(.*?)</hunch-injection>", text, re.DOTALL)
+    if not m:
+        return []
+    return [hit.replace("[", "").replace("]", "") for hit in re.findall(r"\[h-\d{4}\]", m.group(1))]
 
 
 # ---------------------------------------------------------------------------

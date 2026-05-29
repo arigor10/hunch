@@ -32,8 +32,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hunch.journal.feedback import read_labeled_hunch_ids
+from hunch.journal.feedback import (
+    FeedbackWriter,
+    read_hunch_edits,
+    read_hunch_reminders,
+    read_hunch_responses,
+    read_labeled_hunch_ids,
+)
 from hunch.journal.hunches import HunchRecord, HunchesWriter, read_current_hunches
+from hunch.panel import read_max_tick_seq
 
 
 # ---------------------------------------------------------------------------
@@ -56,14 +63,24 @@ class HookResult:
 # Formatting
 # ---------------------------------------------------------------------------
 
-def _format_additional_context(hunches: list[HunchRecord]) -> str:
+def format_hunch_injection(
+    hunches: list[HunchRecord],
+    edits: dict[str, Any] | None = None,
+) -> str:
     """Render pending hunches as injected context.
 
     The framing matters: the Researcher is an instruction-follower.
     If we write "INVESTIGATE THIS", it will drop everything. If we
     write "a colleague observed", it reads as information, not
     command. See critic_v0.md §Output schema rationale.
+
+    If `edits` is provided, edited smell/description override the
+    original for any hunch that was edited before approval.
+
+    Shared by both the UserPromptSubmit hook (additionalContext) and
+    the async-delivery hook (asyncRewake stderr).
     """
+    edits = edits or {}
     lines = [
         "<hunch-injection>",
         "A meeting-room colleague (Hunch) has been watching this work "
@@ -75,10 +92,44 @@ def _format_additional_context(hunches: list[HunchRecord]) -> str:
         "",
     ]
     for h in hunches:
-        lines.append(f"- [{h.hunch_id}] {h.smell}")
-        if h.description:
-            lines.append(f"    {h.description}")
+        edit = edits.get(h.hunch_id)
+        smell = edit.edited_smell if edit else h.smell
+        description = edit.edited_description if edit else h.description
+        lines.append(f"- [{h.hunch_id}] {smell}")
+        if description:
+            lines.append(f"    {description}")
     lines.append("</hunch-injection>")
+    return "\n".join(lines)
+
+
+REMINDER_INTERVAL_TURNS = 10
+
+
+def format_hunch_reminder(
+    hunches: list[HunchRecord],
+    edits: dict[str, Any] | None = None,
+) -> str:
+    """Render a reminder for surfaced-but-unacknowledged hunches.
+
+    Softer framing than ``format_hunch_injection`` — not a new delivery,
+    just a nudge to respond when ready, plus context restoration in case
+    the original injection was compressed away.
+    """
+    edits = edits or {}
+    lines = [
+        "<hunch-reminder>",
+        "These hunches were delivered earlier. When you've worked through them,",
+        'include a "Re h-XXXX:" line with your conclusion.',
+        "",
+    ]
+    for h in hunches:
+        edit = edits.get(h.hunch_id)
+        smell = edit.edited_smell if edit else h.smell
+        description = edit.edited_description if edit else h.description
+        lines.append(f"- [{h.hunch_id}] {smell}")
+        if description:
+            lines.append(f"    {description}")
+    lines.append("</hunch-reminder>")
     return "\n".join(lines)
 
 
@@ -92,7 +143,8 @@ def handle_user_prompt_submit(
     now_iso: str | None = None,
 ) -> HookResult:
     """Read pending hunches from `replay_dir`, inject them as
-    additionalContext, and mark them surfaced.
+    additionalContext, and mark them surfaced. Also remind about
+    surfaced-but-unacknowledged hunches.
 
     `stdin_bytes` is what Claude Code sent — currently unused for
     injection (we always inject pending hunches regardless of prompt
@@ -109,31 +161,58 @@ def handle_user_prompt_submit(
         if not hunches_path.exists():
             return _empty_continue()
 
+        feedback_path = replay_dir / "feedback.jsonl"
         records = read_current_hunches(hunches_path)
-        labels = read_labeled_hunch_ids(replay_dir / "feedback.jsonl")
+        labels = read_labeled_hunch_ids(feedback_path)
+        edits = read_hunch_edits(feedback_path)
+
+        # --- Deliver new approved hunches ---
         approved = [
             r for r in records
             if r.status == "pending" and labels.get(r.hunch_id) == "good"
         ]
-        if not approved:
-            return _empty_continue()
-
-        context = _format_additional_context(approved)
 
         ts = now_iso or _utc_now_iso()
-        writer = HunchesWriter(hunches_path=hunches_path)
-        for r in approved:
-            writer.write_status_change(
-                hunch_id=r.hunch_id,
-                new_status="surfaced",
-                ts=ts,
-                by="hook:user_prompt_submit",
-            )
+        context_parts: list[str] = []
+
+        if approved:
+            context_parts.append(format_hunch_injection(approved, edits=edits))
+            writer = HunchesWriter(hunches_path=hunches_path)
+            for r in approved:
+                writer.write_status_change(
+                    hunch_id=r.hunch_id,
+                    new_status="surfaced",
+                    ts=ts,
+                    by="hook:user_prompt_submit",
+                )
+
+        # --- Remind about unacknowledged surfaced hunches ---
+        responses = read_hunch_responses(feedback_path)
+        reminders = read_hunch_reminders(feedback_path)
+        max_seq = read_max_tick_seq(replay_dir / "conversation.jsonl")
+
+        surfaced_unacked = [
+            r for r in records
+            if r.status == "surfaced" and r.hunch_id not in responses
+        ]
+        due_for_reminder = [
+            r for r in surfaced_unacked
+            if _reminder_due(r.hunch_id, reminders, max_seq)
+        ]
+
+        if due_for_reminder:
+            context_parts.append(format_hunch_reminder(due_for_reminder, edits=edits))
+            fw = FeedbackWriter(feedback_path=feedback_path)
+            for r in due_for_reminder:
+                fw.write_reminder(hunch_id=r.hunch_id, ts=ts, tick_seq=max_seq)
+
+        if not context_parts:
+            return _empty_continue()
 
         payload = {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
-                "additionalContext": context,
+                "additionalContext": "\n\n".join(context_parts),
             }
         }
         return HookResult(stdout=json.dumps(payload))
@@ -141,6 +220,18 @@ def handle_user_prompt_submit(
         import sys
         print(f"[hunch prompt hook] error: {exc}", file=sys.stderr)
         return _empty_continue()
+
+
+def _reminder_due(hunch_id: str, reminders: dict[str, int], current_seq: int) -> bool:
+    """Check if a surfaced hunch is due for a reminder.
+
+    Due if never reminded, or if REMINDER_INTERVAL_TURNS have passed
+    since the last reminder.
+    """
+    last_seq = reminders.get(hunch_id)
+    if last_seq is None:
+        return True
+    return (current_seq - last_seq) >= REMINDER_INTERVAL_TURNS
 
 
 def _empty_continue() -> HookResult:

@@ -319,3 +319,54 @@ def test_feedback_writer_implicit_preserves_reply_text(tmp_path):
     assert entries[0]["channel"] == "implicit"
     assert entries[0]["label"] == "implicit"
     assert entries[0]["scientist_reply"] == reply
+
+
+# ---------------------------------------------------------------------------
+# Response + reminder channels
+# ---------------------------------------------------------------------------
+
+
+def test_feedback_writer_response_channel(tmp_path):
+    fw = FeedbackWriter(feedback_path=tmp_path / "fb.jsonl")
+    fw.write_response("h-0003", "Stale numbers, no contradiction.", "t1")
+    entries = _read_jsonl(fw.feedback_path)
+    assert len(entries) == 1
+    assert entries[0]["channel"] == "response"
+    assert entries[0]["hunch_id"] == "h-0003"
+    assert entries[0]["response_text"] == "Stale numbers, no contradiction."
+
+
+def test_feedback_writer_reminder_channel(tmp_path):
+    fw = FeedbackWriter(feedback_path=tmp_path / "fb.jsonl")
+    fw.write_reminder("h-0001", "t1", tick_seq=42)
+    entries = _read_jsonl(fw.feedback_path)
+    assert len(entries) == 1
+    assert entries[0]["channel"] == "reminder"
+    assert entries[0]["tick_seq"] == 42
+
+
+def test_read_hunch_responses(tmp_path):
+    from hunch.journal.feedback import read_hunch_responses
+    fw = FeedbackWriter(feedback_path=tmp_path / "fb.jsonl")
+    fw.write_response("h-0001", "Fixed the seed issue.", "t1")
+    fw.write_response("h-0003", "No contradiction.", "t2")
+    fw.write_response("h-0001", "Actually, re-ran with new seeds.", "t3")
+    responses = read_hunch_responses(tmp_path / "fb.jsonl")
+    assert len(responses) == 2
+    assert responses["h-0001"].response_text == "Actually, re-ran with new seeds."
+    assert responses["h-0003"].response_text == "No contradiction."
+
+
+def test_read_hunch_responses_missing_file(tmp_path):
+    from hunch.journal.feedback import read_hunch_responses
+    assert read_hunch_responses(tmp_path / "nonexistent.jsonl") == {}
+
+
+def test_read_hunch_reminders(tmp_path):
+    from hunch.journal.feedback import read_hunch_reminders
+    fw = FeedbackWriter(feedback_path=tmp_path / "fb.jsonl")
+    fw.write_reminder("h-0001", "t1", tick_seq=10)
+    fw.write_reminder("h-0001", "t2", tick_seq=25)
+    fw.write_reminder("h-0003", "t3", tick_seq=20)
+    reminders = read_hunch_reminders(tmp_path / "fb.jsonl")
+    assert reminders == {"h-0001": 25, "h-0003": 20}
