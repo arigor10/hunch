@@ -423,6 +423,14 @@ def run(replay_dir: Path, poll_s: float = 1.0, web_port: int = 5556) -> int:
             if r is None:
                 return
 
+            ds = self.snapshot.display_status_for(r.hunch_id, r)
+            if ds != "pending":
+                self.notify(
+                    f"can only edit pending hunches ({r.hunch_id} is {ds})",
+                    severity="warning",
+                )
+                return
+
             def _on_edit_result(result: tuple[str, str] | None) -> None:
                 if result is None:
                     return

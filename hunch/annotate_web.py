@@ -69,6 +69,33 @@ def _validate_replay_dir(replay_dir: Path) -> None:
 # Data loading
 # ---------------------------------------------------------------------------
 
+def _find_artifact_snapshot(arts_dir: Path, name: str) -> Path | None:
+    """Locate the latest snapshot file for an artifact reference.
+
+    Snapshots are named ``<normalized_path>__<ts>__<hash>`` where
+    ``<normalized_path>`` is the artifact's project-relative path with
+    ``/`` replaced by ``_``. A hunch's ``triggering_refs.artifacts`` may
+    store either the full relative path or just the basename, so we try
+    an exact normalized-path prefix first, then fall back to matching the
+    basename against the path-portion of each snapshot.
+    """
+    if not arts_dir.is_dir():
+        return None
+    stem = name.replace("/", "_")
+    exact = sorted(p for p in arts_dir.iterdir() if p.name.startswith(stem + "__"))
+    if exact:
+        return exact[-1]
+    basename = name.rsplit("/", 1)[-1]
+    candidates = [
+        p for p in arts_dir.iterdir()
+        if (pathstem := p.name.split("__", 1)[0]) == basename
+        or pathstem.endswith("_" + basename)
+    ]
+    if candidates:
+        return sorted(candidates, key=lambda p: p.name.split("__", 1)[1:])[-1]
+    return None
+
+
 def _load_conversation(path: Path) -> list[dict]:
     events: list[dict] = []
     if not path.exists():
@@ -552,6 +579,7 @@ kbd { background: #333; padding: 1px 5px; border-radius: 3px; font-size: 11px; b
 let hunches = [];
 let labels = {};
 let currentIdx = 0;
+let renderedHunchId = null;
 let bankMode = false;
 let liveMode = false;
 let availableRuns = [];
@@ -684,6 +712,13 @@ async function selectHunch(idx) {
     renderList();
     renderDetail(h);
     document.getElementById('position').textContent = `${idx+1}/${hunches.length}`;
+
+    // Only re-fetch/re-render the conversation when the selected hunch
+    // actually changed. Background polls (every 3s) land here with the same
+    // hunch; re-rendering would reset the user's scroll position.
+    const hunchId = bankMode ? h.id : h.hunch_id;
+    if (hunchId === renderedHunchId) return;
+    renderedHunchId = hunchId;
 
     const ctxId = bankMode ? encodeURIComponent(h.id) : h.hunch_id;
     const convResp = await fetch(`/api/hunch/${ctxId}/context`);
@@ -1200,17 +1235,10 @@ def create_app(
             name = request.args.get("name", "")
             if not name:
                 return jsonify({"error": "missing name"}), 400
-            stem = name.replace("/", "_")
-            arts_dir = replay_dir / "artifacts"
-            if not arts_dir.is_dir():
-                return jsonify({"error": "no artifacts dir"}), 404
-            matches = sorted(
-                p for p in arts_dir.iterdir()
-                if p.name.startswith(stem + "__")
-            )
-            if not matches:
+            match = _find_artifact_snapshot(replay_dir / "artifacts", name)
+            if match is None:
                 return jsonify({"error": f"artifact {name!r} not found"}), 404
-            content = matches[-1].read_text(errors="replace")
+            content = match.read_text(errors="replace")
             return jsonify({"name": name, "content": content})
 
         @app.route("/api/hunch/<path:item_id>/label", methods=["POST"])
@@ -1370,17 +1398,10 @@ def create_app(
         name = request.args.get("name", "")
         if not name:
             return jsonify({"error": "missing name"}), 400
-        stem = name.replace("/", "_")
-        arts_dir = replay_dir / "artifacts"
-        if not arts_dir.is_dir():
-            return jsonify({"error": "no artifacts dir"}), 404
-        matches = sorted(
-            p for p in arts_dir.iterdir()
-            if p.name.startswith(stem + "__")
-        )
-        if not matches:
+        match = _find_artifact_snapshot(replay_dir / "artifacts", name)
+        if match is None:
             return jsonify({"error": f"artifact {name!r} not found"}), 404
-        content = matches[-1].read_text(errors="replace")
+        content = match.read_text(errors="replace")
         return jsonify({"name": name, "content": content})
 
     @app.route("/api/figure")
