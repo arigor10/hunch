@@ -675,3 +675,159 @@ def test_online_offline_filter_parity(tmp_path: Path):
             f"  offline: {off_norm}\n"
             f"  online:  {on_norm}"
         )
+
+
+# ---------------------------------------------------------------------------
+# `hunch filter` CLI — resume after a --no-filter extension
+# ---------------------------------------------------------------------------
+
+
+class _RecordingFilter:
+    """Stand-in for HunchFilter that records which smells it was asked to
+    check and routes them by a caller-supplied predicate, without any LLM."""
+
+    def __init__(self, *, drop_smells: set[str], **_kwargs) -> None:
+        self._drop = drop_smells
+        self.seeded: list[str] = []
+        self.checked: list[str] = []
+        self._prior_hunches: list[Any] = []
+
+    def init_from_existing(self, existing) -> None:
+        self.seeded.extend(r.smell for r in existing)
+
+    def filter_batch(self, hunches, bookmark_prev, bookmark_now, hunch_ids=None):
+        out = []
+        for h in hunches:
+            self.checked.append(h.smell)
+            if h.smell in self._drop:
+                out.append(FilterResult(
+                    hunch=h, passed=False, filter_type="dedup",
+                    reason="dup", duplicate_of="h-0001",
+                ))
+            else:
+                out.append(FilterResult(hunch=h, passed=True))
+        return out
+
+
+def _write_hunch_line(path: Path, **fields) -> None:
+    append_json_line(path, fields)
+
+
+def test_cmd_filter_resumes_after_no_filter_extension(tmp_path, monkeypatch):
+    """A run that was filtered once, then resumed with --no-filter (leaving a
+    raw tail of unmarked emits alongside prior `filtered` records) must run the
+    real filter over the new tail — NOT rubber-stamp it as survivors.
+
+    Regression test: the old code short-circuited whenever any `filtered`
+    record was present, silently marking the unmarked tail filter_applied
+    without dedup/novelty.
+    """
+    import argparse
+
+    project_dir = tmp_path
+    eval_dir = project_dir / ".hunch" / "eval"
+    replay_dir = project_dir / ".hunch" / "replay"
+    run_dir = eval_dir / "run01"
+    run_dir.mkdir(parents=True)
+    replay_dir.mkdir(parents=True)
+    hunches_path = run_dir / "hunches.jsonl"
+
+    # First half (already filtered back when filter was run): one survivor
+    # + one dropped duplicate.
+    _write_hunch_line(
+        hunches_path, type="emit", hunch_id="h-0001", smell="first survivor",
+        description="d", bookmark_prev=0, bookmark_now=1, emitted_by_tick=1,
+        triggering_refs={}, filter_applied=True,
+    )
+    _write_hunch_line(
+        hunches_path, type="filtered", hunch_id="h-0002", smell="first dup",
+        description="d", bookmark_prev=0, bookmark_now=1, emitted_by_tick=1,
+        triggering_refs={}, filter_applied=True, filter_type="dedup",
+        filter_reason="dup", duplicate_of="h-0001",
+    )
+    # Second half (resumed with --no-filter): raw, unmarked emits. One is a
+    # genuine duplicate of the first-half survivor; one is novel.
+    _write_hunch_line(
+        hunches_path, type="emit", hunch_id="h-0003", smell="tail dup",
+        description="d", bookmark_prev=2, bookmark_now=3, emitted_by_tick=5,
+        triggering_refs={},
+    )
+    _write_hunch_line(
+        hunches_path, type="emit", hunch_id="h-0004", smell="tail novel",
+        description="d", bookmark_prev=2, bookmark_now=3, emitted_by_tick=5,
+        triggering_refs={},
+    )
+
+    captured = {}
+
+    def _factory(**kwargs):
+        f = _RecordingFilter(drop_smells={"tail dup"}, **kwargs)
+        captured["filter"] = f
+        return f
+
+    monkeypatch.setattr("hunch.filter.HunchFilter", _factory)
+
+    from hunch.cli import _cmd_filter
+    ns = argparse.Namespace(project_dir=project_dir, run="run01", dry_run=False)
+    rc = _cmd_filter(ns)
+    assert rc == 0
+
+    f = captured["filter"]
+    # The two raw tail emits were actually run through the filter...
+    assert set(f.checked) == {"tail dup", "tail novel"}
+    # ...and the prior survivor seeded the dedup window (resumability).
+    assert "first survivor" in f.seeded
+
+    # Resulting file: tail dup became `filtered`, tail novel stayed `emit`,
+    # first-half records untouched.
+    recs = [
+        json.loads(l)
+        for l in hunches_path.read_text().strip().splitlines()
+    ]
+    by_id = {r["hunch_id"]: r for r in recs}
+    assert by_id["h-0003"]["type"] == "filtered"
+    assert by_id["h-0003"]["filter_type"] == "dedup"
+    assert by_id["h-0003"]["duplicate_of"] == "h-0001"
+    assert by_id["h-0004"]["type"] == "emit"
+    assert by_id["h-0004"]["filter_applied"] is True
+    # First half preserved.
+    assert by_id["h-0001"]["type"] == "emit" and by_id["h-0001"]["filter_applied"]
+    assert by_id["h-0002"]["type"] == "filtered"
+
+
+def test_cmd_filter_idempotent_when_fully_marked(tmp_path, monkeypatch):
+    """A fully-filtered run (filtered records, no unmarked emits) is a no-op:
+    the filter is never invoked."""
+    import argparse
+
+    project_dir = tmp_path
+    run_dir = project_dir / ".hunch" / "eval" / "run01"
+    (project_dir / ".hunch" / "replay").mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    hunches_path = run_dir / "hunches.jsonl"
+    _write_hunch_line(
+        hunches_path, type="emit", hunch_id="h-0001", smell="s",
+        description="d", bookmark_prev=0, bookmark_now=1, emitted_by_tick=1,
+        triggering_refs={}, filter_applied=True,
+    )
+    _write_hunch_line(
+        hunches_path, type="filtered", hunch_id="h-0002", smell="s2",
+        description="d", bookmark_prev=0, bookmark_now=1, emitted_by_tick=1,
+        triggering_refs={}, filter_applied=True, filter_type="dedup",
+        filter_reason="dup", duplicate_of="h-0001",
+    )
+    before = hunches_path.read_text()
+
+    invoked = {"n": 0}
+
+    def _factory(**kwargs):
+        invoked["n"] += 1
+        return _RecordingFilter(drop_smells=set(), **kwargs)
+
+    monkeypatch.setattr("hunch.filter.HunchFilter", _factory)
+
+    from hunch.cli import _cmd_filter
+    ns = argparse.Namespace(project_dir=project_dir, run="run01", dry_run=False)
+    assert _cmd_filter(ns) == 0
+    assert invoked["n"] == 0  # filter never constructed
+    assert hunches_path.read_text() == before  # file untouched
