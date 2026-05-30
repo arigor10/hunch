@@ -327,6 +327,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="model for dedup judge (default: claude-haiku-4-5-20251001)",
     )
 
+    bank_tombstone = bank_sub.add_parser(
+        "tombstone",
+        help="hide a run from the annotator + label inheritance (reversible)",
+    )
+    bank_tombstone.add_argument("run", help="run name to tombstone")
+    bank_tombstone.add_argument(
+        "--project-dir",
+        type=Path,
+        default=None,
+        help="project directory (default: cwd)",
+    )
+    bank_tombstone.add_argument(
+        "--reason",
+        default="",
+        help="why this run is being tombstoned (recorded in the bank)",
+    )
+    bank_tombstone.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the confirmation prompt",
+    )
+
     mine = sub.add_parser("mine", help="mine ground-truth hunches from conversations")
     mine_sub = mine.add_subparsers(dest="mine_command", metavar="<command>")
 
@@ -1012,8 +1034,68 @@ def _cmd_mine_evidence(ns: argparse.Namespace) -> int:
 def _cmd_bank(ns: argparse.Namespace) -> int:
     if ns.bank_command == "sync":
         return _cmd_bank_sync(ns)
-    sys.stderr.write("hunch bank: specify a subcommand (e.g. sync)\n")
+    if ns.bank_command == "tombstone":
+        return _cmd_bank_tombstone(ns)
+    sys.stderr.write("hunch bank: specify a subcommand (e.g. sync, tombstone)\n")
     return 2
+
+
+def _cmd_bank_tombstone(ns: argparse.Namespace) -> int:
+    from hunch.bank.reader import read_bank
+    from hunch.bank.sync import _now_ts
+    from hunch.bank.writer import BankWriter
+
+    project_dir = (ns.project_dir or Path.cwd()).resolve()
+    bank_path = project_dir / ".hunch" / "bank" / "hunch_bank.jsonl"
+    run = ns.run
+
+    if not bank_path.exists():
+        sys.stderr.write(f"hunch bank tombstone: no bank at {bank_path}\n")
+        return 1
+
+    state = read_bank(bank_path)
+
+    if run in state.tombstoned_runs:
+        sys.stdout.write(f"Run {run!r} is already tombstoned. Nothing to do.\n")
+        return 0
+
+    n_hunches = sum(1 for (r, _hid) in state.hunch_to_bank if r == run)
+    runs_copy = bank_path.parent / "runs" / run / "hunches.jsonl"
+    if n_hunches == 0 and not runs_copy.exists():
+        sys.stderr.write(
+            f"hunch bank tombstone: run {run!r} not found in the bank "
+            f"(no synced hunches, no bank/runs/{run}/ copy).\n"
+        )
+        return 1
+
+    sys.stdout.write(
+        f"\nTombstoning run {run!r} in {bank_path}:\n"
+        f"  - It is hidden from the web annotator (run list and hunches).\n"
+        f"  - Its hunches resolve as 'not_displayable'.\n"
+        f"  - Its bank entries SURVIVE for cross-run dedup, and any human\n"
+        f"    labels it contributed REMAIN canonical (labels are facts).\n"
+        f"  - The bank/runs/{run}/ copy is left on disk untouched.\n"
+        f"  - Reversible: remove the tombstone event from hunch_bank.jsonl.\n"
+        f"  Synced hunches affected: {n_hunches}\n"
+    )
+    if ns.reason:
+        sys.stdout.write(f"  Reason: {ns.reason}\n")
+
+    if not ns.yes:
+        if not sys.stdin.isatty():
+            sys.stderr.write(
+                "hunch bank tombstone: not a TTY; re-run with --yes to confirm.\n"
+            )
+            return 1
+        resp = input(f"\nTombstone {run!r}? [y/N] ").strip().lower()
+        if resp not in ("y", "yes"):
+            sys.stdout.write("Aborted.\n")
+            return 1
+
+    writer = BankWriter(bank_path)
+    writer.write_tombstone(run, _now_ts(), reason=ns.reason)
+    sys.stdout.write(f"Tombstoned {run!r}.\n")
+    return 0
 
 
 def _cmd_bank_sync(ns: argparse.Namespace) -> int:
