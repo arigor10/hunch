@@ -59,29 +59,75 @@ The 108 mined hunches were ingested into the bank via `hunch bank sync`, which d
 
 ### Results
 
-Four critic runs across two architectures and two models were evaluated:
+Three critic runs across two architectures and two models were evaluated. All
+runs now cover the **full** dataset (the `wiki-v1-ar-004` run was resumed from a
+~50% checkpoint and completed 2026-05-30, on `claude-sonnet-4-5-20250929` — the
+same model as the Sonnet accumulator, so the wiki-vs-accumulator comparison is
+model-matched). Caught/recall are computed from bank links: a ground-truth
+concern is "caught" when one of a run's hunches links to (or sources) the same
+bank entry as a mined hunch. No LLM scoring — the links already exist from
+`hunch bank sync`.
 
-| Run | Architecture | Model | Hunches emitted | Caught | Recall |
+| Run | Architecture | Model | Survivors (post-filter) | Caught | Recall |
 |---|---|---|---|---|---|
-| Sonnet accumulator | accumulator v0.1 | Sonnet 4.5 | 126 | 20 | **19.6%** |
-| DeepSeek accumulator | accumulator v0.1 | DeepSeek V4 Pro | 175 | 14 | **13.7%** |
-| Sonnet wiki | wiki v1 | Sonnet 4.5 | 71 | 8 | **7.8%** |
-| **Sonnet combined** | both | Sonnet 4.5 | 197 | 24 | **23.5%** |
-| **All critics combined** | — | — | 372 | 29 | **28.4%** |
+| Sonnet accumulator (`ar_v1.1_multi`) | accumulator v0.1 | Sonnet 4.5 | 126 | 20 | **19.6%** |
+| DeepSeek accumulator (`accum-deepseek-v4-pro-001`) | accumulator v0.1 | DeepSeek V4 Pro | 175 | 13 | **12.7%** |
+| Sonnet wiki (`wiki-v1-ar-004`) | wiki v1 | Sonnet 4.5 | 142 | 13 | **12.7%** |
+| **Sonnet combined** | both | Sonnet 4.5 | 268 | 27 | **26.5%** |
+| **All three combined** | — | — | 443 | 32 | **31.4%** |
 
-The **accumulator v0.1** is a sliding-window critic that receives a compacted summary accumulated across the full session. Each tick appends new conversation to the summary and asks the model to identify anomalies. The **wiki v1** is an agentic critic that maintains a persistent structured knowledge base (wiki) across ticks, reading and writing entity files with tool use.
+The **accumulator v0.1** is a sliding-window critic that receives a compacted
+summary accumulated across the full session. Each tick appends new conversation
+to the summary and asks the model to identify anomalies. The **wiki v1** is an
+agentic critic that maintains a persistent structured knowledge base (wiki)
+across ticks, reading and writing entity files with tool use.
 
-73 of 102 ground-truth concepts (72%) were missed by every critic.
+70 of 102 ground-truth concepts (69%) were missed by every critic.
+
+**Model-matched comparison (both Sonnet 4.5):** the wiki (12.7%) trails the
+accumulator (19.6%) on overall recall — consistent with the SP finding that the
+sliding-window accumulator out-recalls the wiki on mined ground truth at equal
+model. But see the overlap analysis: on AR the wiki contributes a substantial
+set of *exclusive* catches the accumulators miss, which it did **not** on SP.
 
 ### Overlap between critics
 
-| | Exclusive catches | Shared with others |
-|---|---|---|
-| Sonnet accumulator | 9 | 11 |
-| DeepSeek accumulator | 5 | 9 |
-| Sonnet wiki | 3 | 5 |
+Among the three full runs, of the 102 ground-truth concerns:
 
-The wiki adds 3 catches the accumulators missed, but its overall recall is the lowest. DeepSeek adds 5 unique catches despite lower overall recall than Sonnet — the two models catch partially different concerns.
+| | Caught | Exclusive (only this run) | Shared with ≥1 other |
+|---|---|---|---|
+| Sonnet accumulator | 20 | 8 | 12 |
+| DeepSeek accumulator | 13 | 5 | 8 |
+| Sonnet wiki | 13 | 6 | 7 |
+
+Pairwise shared catches: wiki∩Sonnet-accum = 6, wiki∩DeepSeek-accum = 2,
+Sonnet-accum∩DeepSeek-accum = 7.
+
+**The wiki adds 6 exclusive catches** — concerns no accumulator caught — nearly
+matching the Sonnet accumulator's 8 despite lower total recall. This is the key
+difference from SP, where the wiki had **0** exclusive catches. The wiki's
+unique AR catches lean toward longer-range and process concerns that need
+cross-tick state to surface:
+
+- `hb-0142`: BiPO L16 Pareto relationship reversed between original and rerun
+- `hb-0155`: Step 1 L16 drift (cos=0.624) violated the plan's pre-registered failure criterion
+- `hb-0182`: mechanistic "linear regime advantage" stated as fact before tested
+- `hb-0234`: DC-only KL (0.004) is below the exp-023 noise floor (0.006) — the "signal" is undetectable
+- `hb-0262`: asymmetry regularizer Pareto-improves BiPO despite DPO's implicit KL already blocking leakage
+- `hb-0263`: telescopic "fails" verdict never re-examined after a retroactive confound audit
+
+So while the wiki under-recalls the accumulator head-to-head, it is genuinely
+**complementary** on AR: combining the wiki with the Sonnet accumulator lifts
+recall from 19.6% → 26.5%, and all three together reach 31.4%. The earlier SP
+conclusion ("the wiki caught nothing the accumulators missed") does **not**
+generalize — on a longer, more experiment-dense project the persistent wiki
+surfaces distinct concerns.
+
+*(Caveat: numbers are recomputed from the live bank as of 2026-05-30 and differ
+slightly from earlier snapshots — e.g. the DeepSeek accumulator is 13 here vs 14
+in a prior snapshot — because intervening re-syncs adjusted a few links. All
+rows in this table are from the same bank state, so they are mutually
+consistent.)*
 
 ### Evidence accessibility analysis
 
