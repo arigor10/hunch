@@ -253,10 +253,18 @@ def _sync_one_run(
     bank_copy_dir = runs_dir / rname
     bank_copy_path = bank_copy_dir / "hunches.jsonl"
 
-    # Check if already ingested
+    # Check if already ingested. Three cases when a bank copy exists:
+    #   1. identical            -> nothing changed; fall through (no new ids)
+    #   2. clean extension       -> the eval run was extended (same run, more
+    #      ticks appended): the bank copy's emitted (id, smell) sequence is an
+    #      ordered prefix of the eval file's. Refresh the durable copy and
+    #      ingest the new tail. This is the resume/extend case.
+    #   3. genuine conflict      -> anything else (renumber, re-extract,
+    #      reorder, removed/changed hunches). Refuse and tell the user.
     if bank_copy_path.exists():
-        conflict = _check_conflict(eval_hunches_path, bank_copy_path)
-        if conflict:
+        relation = _bank_copy_relation(eval_hunches_path, bank_copy_path)
+        if relation == "conflict":
+            conflict = _check_conflict(eval_hunches_path, bank_copy_path)
             if log:
                 log(f"  CONFLICT: {conflict}")
             return RunSyncResult(
@@ -264,6 +272,15 @@ def _sync_one_run(
                 status="skipped_conflict",
                 conflict_detail=conflict,
             )
+        if relation == "extension":
+            # The eval file is the source of truth; the bank's self-contained
+            # copy must hold the full current content so the new tail's
+            # (run, hunch_id) references resolve. Back up, then refresh.
+            if log:
+                log(f"  eval run extended since last sync — refreshing "
+                    f"bank copy and ingesting new hunches")
+            _backup_then_copy(eval_hunches_path, bank_copy_path)
+        # relation == "identical": leave the copy as-is.
     else:
         bank_copy_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(eval_hunches_path, bank_copy_path)
@@ -585,6 +602,42 @@ def _sync_mined_run(
 # Conflict detection
 # ---------------------------------------------------------------------------
 
+def _bank_copy_relation(eval_path: Path, bank_copy_path: Path) -> str:
+    """Classify how the eval file relates to the existing bank copy.
+
+    Compares the ordered sequence of emitted (hunch_id, smell) pairs.
+
+    Returns:
+      "identical"  — same emitted sequence; nothing to re-copy.
+      "extension"  — the bank copy is an ordered prefix of the eval file
+                     (the run was extended with more ticks). Safe to refresh
+                     the copy and ingest the new tail.
+      "conflict"   — anything else: hunches removed, changed, reordered, or
+                     renumbered. Not safe to auto-resolve.
+    """
+    eval_seq = _hunch_identity_sequence(eval_path)
+    bank_seq = _hunch_identity_sequence(bank_copy_path)
+
+    if eval_seq == bank_seq:
+        return "identical"
+    if eval_seq[: len(bank_seq)] == bank_seq:
+        # Every prior emitted hunch is still present, in the same order and
+        # position, and the eval file only adds entries after them.
+        return "extension"
+    return "conflict"
+
+
+def _backup_then_copy(src: Path, dst: Path) -> None:
+    """Refresh the durable bank copy from src, backing up the old copy first.
+
+    Never overwrite an expensive artifact without a backup: the prior copy is
+    kept at `<dst>.bak` so a botched refresh is recoverable.
+    """
+    if dst.exists():
+        shutil.copy2(dst, dst.with_suffix(dst.suffix + ".bak"))
+    shutil.copy2(src, dst)
+
+
 def _check_conflict(eval_path: Path, bank_copy_path: Path) -> str:
     """Compare eval and bank copies by (hunch_id, smell) tuples.
 
@@ -615,7 +668,18 @@ def _check_conflict(eval_path: Path, bank_copy_path: Path) -> str:
 
 def _hunch_identity_tuples(path: Path) -> set[tuple[str, str]]:
     """Extract (hunch_id, smell) tuples from emitted hunches."""
-    tuples = set()
+    return set(_hunch_identity_sequence(path))
+
+
+def _hunch_identity_sequence(path: Path) -> list[tuple[str, str]]:
+    """Extract emitted (hunch_id, smell) pairs in file order.
+
+    File order is append order (single-threaded writer), so this is the
+    chronological emit sequence — what the prefix check in
+    `_bank_copy_relation` relies on. Filtered (suppressed) hunches are
+    excluded, matching `_check_conflict` / `_load_emitted_hunches`.
+    """
+    seq: list[tuple[str, str]] = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -629,8 +693,8 @@ def _hunch_identity_tuples(path: Path) -> set[tuple[str, str]]:
                 continue
             if d.get("filtered"):
                 continue
-            tuples.add((d.get("hunch_id", ""), d.get("smell", "")))
-    return tuples
+            seq.append((d.get("hunch_id", ""), d.get("smell", "")))
+    return seq
 
 
 # ---------------------------------------------------------------------------
