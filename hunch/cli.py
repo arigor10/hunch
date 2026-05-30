@@ -749,26 +749,19 @@ def _cmd_filter(ns: argparse.Namespace) -> int:
             and not d.get("filter_applied")
         ]
 
-        if has_any_filtered and not unfiltered_emits:
-            _log(f"  already filtered (has filtered events, no unmarked emits)")
+        if not unfiltered_emits:
+            _log(f"  already filtered (no unmarked emits)")
             _log("")
             continue
 
-        if has_any_filtered:
-            # File has filtered events — the inline filter ran.
-            # Mark remaining unmarked emits as filter_applied.
-            _log(f"  {len(unfiltered_emits)} unmarked emits in already-"
-                 f"filtered file — marking as filter_applied")
-            if not ns.dry_run:
-                for idx, d in unfiltered_emits:
-                    d["filter_applied"] = True
-                    parsed[idx] = d
-                _atomic_rewrite_jsonl(hunches_path, parsed)
-            _log("")
-            continue
-
-        # No filtered events at all — this run was never filtered.
-        # Run the full filter.
+        # There are unmarked emits to filter. They may coexist with prior
+        # `filtered` records (e.g. a run that was filtered once, then resumed
+        # with --no-filter to extend coverage, leaving the new tail as raw
+        # emits). We do NOT trust unmarked emits just because the file already
+        # has filtered records — that was a silent-degradation bug that
+        # rubber-stamped the new tail without running dedup/novelty. Instead we
+        # always run the real filter on the unmarked emits, seeding the dedup
+        # window from the prior survivors below so resume is correct.
         all_emits = [
             d for d in parsed
             if d is not None and d.get("type") == "emit"
