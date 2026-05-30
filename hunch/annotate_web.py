@@ -223,6 +223,7 @@ def _resolve_run_hunches_path(
 def _discover_runs(
     eval_dir: Path | None,
     bank_dir: Path | None = None,
+    tombstoned: set[str] | None = None,
 ) -> list[dict]:
     """Return metadata for each annotatable run.
 
@@ -230,8 +231,10 @@ def _discover_runs(
     (``bank/runs/<run>``) and the eval directory, so a run that was synced to
     the bank still appears even if its eval directory was later deleted.
     Synthetic bank runs (``:live``, ``:mined:*``) are excluded — they are not
-    part of the eval annotation surface.
+    part of the eval annotation surface. Tombstoned runs are excluded too,
+    mirroring the label resolver's ``not_displayable`` verdict.
     """
+    tombstoned = tombstoned or set()
     names: set[str] = set()
     roots = []
     if bank_dir is not None:
@@ -243,6 +246,8 @@ def _discover_runs(
             continue
         for d in sorted(root.iterdir()):
             if not d.is_dir() or d.name.startswith(":"):
+                continue
+            if d.name in tombstoned:
                 continue
             if (d / "hunches.jsonl").exists():
                 names.add(d.name)
@@ -284,11 +289,15 @@ def _load_bank_items(
     """Load hunches from selected runs, grouped by bank entry.
 
     Content is resolved from the durable ``bank/runs/`` copy when available,
-    falling back to the eval directory for unsynced runs.
+    falling back to the eval directory for unsynced runs. Tombstoned runs are
+    skipped, mirroring the label resolver's ``not_displayable`` verdict.
     """
+    tombstoned = getattr(state, "tombstoned_runs", None) or set()
     items_by_id: dict[str, dict] = {}
 
     for run_name in selected_runs:
+        if run_name in tombstoned:
+            continue
         hunches_path = _resolve_run_hunches_path(run_name, bank_dir, eval_dir)
         if hunches_path is None:
             continue
@@ -1315,7 +1324,10 @@ def create_app(
         if bank_path.exists():
             from hunch.bank import read_bank
             bank_state = read_bank(bank_path)
-        available_runs = _discover_runs(eval_dir, bank_dir)
+        available_runs = _discover_runs(
+            eval_dir, bank_dir,
+            getattr(bank_state, "tombstoned_runs", None),
+        )
     elif run_dir is not None:
         inferred = _infer_project_dir(run_dir)
         if inferred is not None:
@@ -1326,7 +1338,10 @@ def create_app(
                 from hunch.bank import read_bank
                 bank_state = read_bank(bank_path)
                 bank_mode = True
-                available_runs = _discover_runs(eval_dir, bank_dir)
+                available_runs = _discover_runs(
+                    eval_dir, bank_dir,
+                    getattr(bank_state, "tombstoned_runs", None),
+                )
                 run_name = run_dir.name
                 for r in available_runs:
                     r["selected"] = (r["name"] == run_name)
@@ -1469,6 +1484,9 @@ def create_app(
 
     @app.route("/api/hunch-detail/<run>/<hunch_id>")
     def api_hunch_detail(run: str, hunch_id: str):
+        tombstoned = getattr(bank_state, "tombstoned_runs", None) or set()
+        if run in tombstoned:
+            return jsonify({"error": f"run {run!r} is tombstoned"}), 404
         hunches_path = _resolve_run_hunches_path(run, bank_dir, eval_dir)
         if hunches_path is None:
             return jsonify({"error": f"run {run!r} not found"}), 404

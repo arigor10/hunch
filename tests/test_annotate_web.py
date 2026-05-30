@@ -155,3 +155,33 @@ def test_discover_excludes_synthetic_runs(tmp_path):
 
     names = [r["name"] for r in _discover_runs(eval_dir, bank_dir)]
     assert names == ["real"]
+
+
+class _FakeState:
+    """Minimal stand-in for BankState: only the fields these helpers touch."""
+
+    def __init__(self, tombstoned: set[str]):
+        self.tombstoned_runs = tombstoned
+        self.hunch_to_bank: dict[tuple[str, str], str] = {}
+
+
+def test_discover_excludes_tombstoned_runs(tmp_path):
+    bank_dir = tmp_path / "bank"
+    eval_dir = tmp_path / "eval"
+    _write_run(bank_dir / "runs", "good", [_emit("h-1")])
+    _write_run(bank_dir / "runs", "dead", [_emit("h-2")])
+    _write_run(eval_dir, "dead", [_emit("h-2")])
+
+    names = [r["name"] for r in _discover_runs(eval_dir, bank_dir, {"dead"})]
+    assert names == ["good"]
+
+
+def test_load_bank_items_skips_tombstoned_runs(tmp_path):
+    bank_dir = tmp_path / "bank"
+    eval_dir = tmp_path / "eval"
+    _write_run(bank_dir / "runs", "dead", [_emit("h-1"), _emit("h-2")])
+    eval_dir.mkdir()
+
+    state = _FakeState({"dead"})
+    items = _load_bank_items(state, eval_dir, ["dead"], bank_dir)
+    assert items == []
