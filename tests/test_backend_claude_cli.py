@@ -58,6 +58,20 @@ class TestClaudeCliBackend:
         resp = ClaudeCliBackend().call("p")
         assert resp.input_tokens == 1500
 
+    def test_cache_read_vs_creation_split(self, monkeypatch):
+        """cached_tokens = read + creation (total touched); cache_read_tokens
+        = reads only. The two must NOT be conflated — creation is a premium
+        write, not a hit."""
+        # input=1000, cache_read=200, cache_create=300
+        envelope = _make_envelope("ok", 1000, cache_read=200, cache_create=300)
+        monkeypatch.setattr(subprocess, "run",
+                            lambda cmd, **kw: FakeCompletedProcess(stdout=envelope))
+
+        resp = ClaudeCliBackend().call("p")
+        assert resp.cached_tokens == 500       # 200 read + 300 creation
+        assert resp.cache_read_tokens == 200   # reads only
+        assert resp.input_tokens == 1500       # 1000 + 500
+
     def test_no_usage(self, monkeypatch):
         envelope = json.dumps({"result": "text only"})
 

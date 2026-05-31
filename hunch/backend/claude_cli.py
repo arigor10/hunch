@@ -55,9 +55,11 @@ class ClaudeCliBackend:
         input_tokens: int | None = None
         output_tokens: int | None = None
         cached_tokens: int | None = None
+        cache_read_tokens: int | None = None
         if usage:
+            cache_read_tokens = usage.get("cache_read_input_tokens", 0)
             cached_tokens = (
-                usage.get("cache_read_input_tokens", 0)
+                cache_read_tokens
                 + usage.get("cache_creation_input_tokens", 0)
             )
             input_tokens = usage.get("input_tokens", 0) + cached_tokens
@@ -67,5 +69,6 @@ class ClaudeCliBackend:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_tokens=cached_tokens,
+            cache_read_tokens=cache_read_tokens,
             cost_usd=cost_usd,
         )

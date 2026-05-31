@@ -1,0 +1,26 @@
+# Critic accumulator v0.1 backed by Claude Opus 4.6 via the `claude` CLI.
+#
+# Same architecture/prompt/watermarks as sonnet_claude_cli.toml — only the
+# model differs — so an accumulator run with this config is a clean,
+# model-only A/B against ar_v1.1_multi (Sonnet 4.5). Opus 4.6 is the model
+# that conducted the AR research itself.
+#
+# Both models have a 200k context window, so the watermarks are unchanged.
+#
+# min_tick_interval_s is 10 (vs sonnet config's 180): the rate limiter existed
+# to keep a full run inside the Max plan's 5-hour window, but the accumulator's
+# prompt prefix is cached (cache_read hits confirmed on this claude CLI), so the
+# hourly token budget is no longer the binding constraint. 10s is effectively
+# moot anyway — each Opus tick takes 60-430s, far longer than the floor.
+[backend]
+type = "claude_cli"
+model = "claude-opus-4-6"
+
+[backend.params]
+timeout_s = 600
+
+[engine]
+low_watermark = 140000
+high_watermark = 180000
+max_consecutive_failures = 3
+min_tick_interval_s = 10

@@ -59,22 +59,25 @@ The 108 mined hunches were ingested into the bank via `hunch bank sync`, which d
 
 ### Results
 
-Three critic runs across two architectures and two models were evaluated. All
-runs now cover the **full** dataset (the `wiki-v1-ar-004` run was resumed from a
-~50% checkpoint and completed 2026-05-30, on `claude-sonnet-4-5-20250929` — the
-same model as the Sonnet accumulator, so the wiki-vs-accumulator comparison is
-model-matched). Caught/recall are computed from bank links: a ground-truth
-concern is "caught" when one of a run's hunches links to (or sources) the same
-bank entry as a mined hunch. No LLM scoring — the links already exist from
-`hunch bank sync`.
+Four critic runs across two architectures and three models were evaluated, all
+over the **full** dataset. Two are model-matched accumulators (Sonnet 4.5 vs
+Opus 4.6 — same prompt, watermarks, and trigger; only the model differs), which
+isolates the effect of the underlying model. (`wiki-v1-ar-004` was resumed from
+a ~50% checkpoint and completed 2026-05-30; the Opus accumulator
+`accum-opus46-ar-001` ran 2026-05-31 on `claude-opus-4-6` — the model that
+actually conducted this AR research.) Caught/recall are computed from bank
+links: a ground-truth concern is "caught" when one of a run's hunches links to
+(or sources) the same bank entry as a mined hunch. No LLM scoring — the links
+already exist from `hunch bank sync`.
 
 | Run | Architecture | Model | Survivors (post-filter) | Caught | Recall |
 |---|---|---|---|---|---|
 | Sonnet accumulator (`ar_v1.1_multi`) | accumulator v0.1 | Sonnet 4.5 | 126 | 20 | **19.6%** |
+| **Opus accumulator (`accum-opus46-ar-001`)** | accumulator v0.1 | **Opus 4.6** | 77 | 12 | **11.8%** |
 | DeepSeek accumulator (`accum-deepseek-v4-pro-001`) | accumulator v0.1 | DeepSeek V4 Pro | 175 | 13 | **12.7%** |
 | Sonnet wiki (`wiki-v1-ar-004`) | wiki v1 | Sonnet 4.5 | 142 | 13 | **12.7%** |
 | **Sonnet combined** | both | Sonnet 4.5 | 268 | 27 | **26.5%** |
-| **All three combined** | — | — | 443 | 32 | **31.4%** |
+| **All four combined** | — | — | 520 | 38 | **37.3%** |
 
 The **accumulator v0.1** is a sliding-window critic that receives a compacted
 summary accumulated across the full session. Each tick appends new conversation
@@ -82,48 +85,84 @@ to the summary and asks the model to identify anomalies. The **wiki v1** is an
 agentic critic that maintains a persistent structured knowledge base (wiki)
 across ticks, reading and writing entity files with tool use.
 
-70 of 102 ground-truth concepts (69%) were missed by every critic.
+64 of 102 ground-truth concepts (63%) were missed by every critic.
 
-**Model-matched comparison (both Sonnet 4.5):** the wiki (12.7%) trails the
-accumulator (19.6%) on overall recall — consistent with the SP finding that the
+**Model dependence (Sonnet 4.5 vs Opus 4.6, same accumulator):** the headline,
+and a surprising one — **the stronger/more-expensive model recalled *fewer*
+ground-truth concerns: Opus 11.8% vs Sonnet 19.6%.** Recall depends heavily on
+the model, but *not* monotonically in model capability. Mechanism (from the run
+data): Opus emitted ~the same *raw* hunch volume (226 vs Sonnet's 247) but those
+collapsed to far fewer **distinct** concerns after dedup (77 survivors vs 126;
+66% of Opus's raw hunches were near-duplicates vs ~49% for Sonnet). Opus is
+*verbose-repetitive* — it re-flags the same handful of concerns across many
+ticks rather than spreading across new ones, so it covers less ground truth.
+
+Three caveats temper any "Opus is a worse critic" reading:
+1. **Self-authorship.** Opus 4.6 conducted this AR research. We expected
+   familiarity might *inflate* its recall; it scored *lower* instead — so either
+   familiarity didn't help or it actively suppressed flags ("I remember this
+   resolved fine"). A clean control needs Opus critiquing a project it did not
+   author.
+2. **Prompt fit.** The accumulator prompt was iterated on Sonnet; Opus's
+   verbose-repetitive behavior may be partly a prompt-fit artifact, not pure
+   capability. A prompt-iteration pass on Opus is warranted before ranking.
+3. **n=1 project, 102 concerns.** Small sample.
+
+So the result is illuminating but not yet a clean capability ranking: it
+establishes that model choice moves recall by ~8 points on identical scaffolding
+and in an unexpected direction.
+
+**Architecture (both Sonnet 4.5):** the wiki (12.7%) also trails the accumulator
+(19.6%) on overall recall — consistent with the SP finding that the
 sliding-window accumulator out-recalls the wiki on mined ground truth at equal
 model. But see the overlap analysis: on AR the wiki contributes a substantial
 set of *exclusive* catches the accumulators miss, which it did **not** on SP.
 
 ### Overlap between critics
 
-Among the three full runs, of the 102 ground-truth concerns:
+Among the four full runs, of the 102 ground-truth concerns:
 
 | | Caught | Exclusive (only this run) | Shared with ≥1 other |
 |---|---|---|---|
 | Sonnet accumulator | 20 | 8 | 12 |
+| Opus accumulator | 12 | 6 | 6 |
 | DeepSeek accumulator | 13 | 5 | 8 |
-| Sonnet wiki | 13 | 6 | 7 |
+| Sonnet wiki | 13 | 5 | 8 |
 
 Pairwise shared catches: wiki∩Sonnet-accum = 6, wiki∩DeepSeek-accum = 2,
-Sonnet-accum∩DeepSeek-accum = 7.
+Sonnet-accum∩DeepSeek-accum = 7; Opus-accum∩Sonnet-accum = 5,
+Opus-accum∩DeepSeek-accum = 4, Opus-accum∩wiki = 3.
 
-**The wiki adds 6 exclusive catches** — concerns no accumulator caught — nearly
-matching the Sonnet accumulator's 8 despite lower total recall. This is the key
-difference from SP, where the wiki had **0** exclusive catches. The wiki's
-unique AR catches lean toward longer-range and process concerns that need
-cross-tick state to surface:
+**The Opus accumulator is not a subset of the Sonnet one.** Of its 12 catches, 6
+are exclusive among all four runs — so the two models surface partly *different*
+concerns. Model choice changes not just *how much* you catch but *what* you
+catch, which is why "All four combined" reaches 37.3% vs 31.4% for the three
+Sonnet/DeepSeek runs (Opus adds 6 net-new).
+
+**The wiki adds 5 exclusive catches** (among all four runs) — concerns no other
+critic caught — despite its lower total recall. This is the key difference from
+SP, where the wiki had **0** exclusive catches. The wiki's unique AR catches
+lean toward longer-range and process concerns that need cross-tick state to
+surface:
 
 - `hb-0142`: BiPO L16 Pareto relationship reversed between original and rerun
-- `hb-0155`: Step 1 L16 drift (cos=0.624) violated the plan's pre-registered failure criterion
 - `hb-0182`: mechanistic "linear regime advantage" stated as fact before tested
 - `hb-0234`: DC-only KL (0.004) is below the exp-023 noise floor (0.006) — the "signal" is undetectable
 - `hb-0262`: asymmetry regularizer Pareto-improves BiPO despite DPO's implicit KL already blocking leakage
 - `hb-0263`: telescopic "fails" verdict never re-examined after a retroactive confound audit
 
+(A sixth — `hb-0155`, Step 1 L16 drift violating the plan's pre-registered
+failure criterion — was exclusive to the wiki among the three Sonnet/DeepSeek
+runs but is now shared with the Opus accumulator.)
+
 So while the wiki under-recalls the accumulator head-to-head, it is genuinely
 **complementary** on AR: combining the wiki with the Sonnet accumulator lifts
-recall from 19.6% → 26.5%, and all three together reach 31.4%. The earlier SP
+recall from 19.6% → 26.5%, and all four together reach 37.3%. The earlier SP
 conclusion ("the wiki caught nothing the accumulators missed") does **not**
 generalize — on a longer, more experiment-dense project the persistent wiki
 surfaces distinct concerns.
 
-*(Caveat: numbers are recomputed from the live bank as of 2026-05-30 and differ
+*(Caveat: numbers are recomputed from the live bank as of 2026-05-31 and differ
 slightly from earlier snapshots — e.g. the DeepSeek accumulator is 13 here vs 14
 in a prior snapshot — because intervening re-syncs adjusted a few links. All
 rows in this table are from the same bank state, so they are mutually

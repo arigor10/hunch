@@ -12,7 +12,12 @@ class ModelResponse:
     text: str
     input_tokens: int | None = None
     output_tokens: int | None = None
+    # cached_tokens = cache_read + cache_creation (total tokens that touched
+    # the cache, read OR written). cache_read_tokens = the cheap reads only.
+    # They differ on cache *writes* (creation) — billed at a premium and NOT a
+    # hit — so keep them separate; "% hit" should reflect real reads.
     cached_tokens: int | None = None
+    cache_read_tokens: int | None = None
     cost_usd: float | None = None
 
 

@@ -61,9 +61,11 @@ class AnthropicSdkBackend:
         input_tokens: int | None = None
         output_tokens: int | None = None
         cached_tokens: int | None = None
+        cache_read_tokens: int | None = None
         if usage is not None:
+            cache_read_tokens = getattr(usage, "cache_read_input_tokens", 0)
             cached_tokens = (
-                getattr(usage, "cache_read_input_tokens", 0)
+                cache_read_tokens
                 + getattr(usage, "cache_creation_input_tokens", 0)
             )
             input_tokens = getattr(usage, "input_tokens", 0) + cached_tokens
@@ -73,4 +75,5 @@ class AnthropicSdkBackend:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_tokens=cached_tokens,
+            cache_read_tokens=cache_read_tokens,
         )
