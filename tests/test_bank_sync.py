@@ -389,6 +389,69 @@ class TestConflictDetection:
         result = sync(bank_dir, eval_dir, _never_dup_judge)
         assert result.runs[0].status == "skipped_up_to_date"
 
+    def test_reordered_hunches_are_conflict(self, tmp_path):
+        """Same id set but different order is NOT a safe extension."""
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        _write_hunches(eval_dir / "run01", SAMPLE_HUNCHES)
+        sync(bank_dir, eval_dir, _never_dup_judge)
+
+        # Reverse order (same ids/smells, different sequence).
+        _write_hunches(eval_dir / "run01", list(reversed(SAMPLE_HUNCHES)))
+        result = sync(bank_dir, eval_dir, _never_dup_judge)
+        assert result.runs[0].status == "skipped_conflict"
+
+
+class TestExtendedRunResync:
+    """A run extended with more ticks (eval is an ordered prefix-extension of
+    the bank copy) must re-ingest the new tail and refresh the durable copy —
+    not be rejected as a conflict, and not leave the copy stale."""
+
+    def test_extension_reingests_and_refreshes_copy(self, tmp_path):
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        # First sync: only the first 2 hunches existed.
+        _write_hunches(eval_dir / "run01", SAMPLE_HUNCHES[:2])
+        first = sync(bank_dir, eval_dir, _never_dup_judge)
+        assert first.runs[0].status == "ingested"
+        assert first.runs[0].new_entries == 2
+
+        # Run extended: a 3rd hunch appended after the original two.
+        _write_hunches(eval_dir / "run01", SAMPLE_HUNCHES)
+        result = sync(bank_dir, eval_dir, _never_dup_judge)
+
+        # The new tail is ingested (resume, not conflict, not no-op).
+        assert result.runs[0].status == "resumed"
+        assert result.runs[0].new_entries == 1
+        assert result.runs[0].hunches_processed == 1
+
+        # The bank now knows all three.
+        state = read_bank(bank_dir / "hunch_bank.jsonl")
+        ingested = {hid for (run, hid) in state.hunch_to_bank if run == "run01"}
+        assert ingested == {"h-0001", "h-0002", "h-0003"}
+
+        # The durable bank copy was refreshed to the full current content,
+        # so the new tail's (run, hunch_id) resolves against it.
+        bank_copy = bank_dir / "runs" / "run01" / "hunches.jsonl"
+        copy_ids = {
+            json.loads(l)["hunch_id"]
+            for l in bank_copy.read_text().splitlines()
+            if l.strip() and json.loads(l).get("type") == "emit"
+        }
+        assert copy_ids == {"h-0001", "h-0002", "h-0003"}
+
+        # And the prior copy was backed up before the refresh.
+        assert (bank_dir / "runs" / "run01" / "hunches.jsonl.bak").exists()
+
+    def test_second_resync_after_extension_is_noop(self, tmp_path):
+        bank_dir, eval_dir = _setup_project(tmp_path)
+        _write_hunches(eval_dir / "run01", SAMPLE_HUNCHES[:2])
+        sync(bank_dir, eval_dir, _never_dup_judge)
+        _write_hunches(eval_dir / "run01", SAMPLE_HUNCHES)
+        sync(bank_dir, eval_dir, _never_dup_judge)
+
+        # Third sync, nothing changed → up to date.
+        result = sync(bank_dir, eval_dir, _never_dup_judge)
+        assert result.runs[0].status == "skipped_up_to_date"
+
 
 # ---------------------------------------------------------------------------
 # Legacy labels migration tests
