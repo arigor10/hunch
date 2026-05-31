@@ -122,6 +122,13 @@ class OpenRouterBackend:
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     cached_tokens=cached_tokens,
+                    # OpenAI-style usage reports a single cached-token figure
+                    # (prompt_tokens_details.cached_tokens) which is reads only
+                    # — there is no premium "creation" field as on Anthropic. So
+                    # reads == cached_tokens here; populate both, otherwise the
+                    # engine's cache-hit % (which keys off cache_read_tokens)
+                    # reports 0% for OpenRouter even on a warm cache.
+                    cache_read_tokens=cached_tokens,
                     cost_usd=float(cost) if cost is not None else None,
                 )
             except RuntimeError:

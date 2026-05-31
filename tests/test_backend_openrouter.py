@@ -12,8 +12,14 @@ from hunch.backend.openrouter import OpenRouterBackend
 
 
 @dataclass
+class FakeDetails:
+    cached_tokens: int = 0
+
+
+@dataclass
 class FakeUsage:
     prompt_tokens: int = 800
+    prompt_tokens_details: Any = None
 
 
 @dataclass
@@ -86,6 +92,19 @@ class TestOpenRouterBackend:
         assert resp.text == "model output"
         assert resp.input_tokens == 800
         assert client.chat.completions.calls == 1
+
+    def test_cached_tokens_populate_cache_read(self):
+        """OpenRouter reports a single reads-only cached-token figure; it must
+        flow into BOTH cached_tokens and cache_read_tokens, else the engine's
+        hit-rate (which keys off cache_read_tokens) reads 0% on a warm cache."""
+        usage = FakeUsage(prompt_tokens=800,
+                          prompt_tokens_details=FakeDetails(cached_tokens=600))
+        completion = FakeCompletion(usage=usage)
+        client = FakeOpenAIClient(completions=[completion])
+        backend = self._make(client=client)
+        resp = backend.call("p")
+        assert resp.cached_tokens == 600
+        assert resp.cache_read_tokens == 600
 
     def test_none_content_returns_empty(self):
         choice = FakeChoice()
