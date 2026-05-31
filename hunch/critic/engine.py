@@ -132,6 +132,7 @@ class CriticEngine(Critic):
     _total_input_tokens: int = field(default=0, init=False, repr=False)
     _total_output_tokens: int = field(default=0, init=False, repr=False)
     _total_cached_tokens: int = field(default=0, init=False, repr=False)
+    _total_cache_read_tokens: int = field(default=0, init=False, repr=False)
     _total_calls: int = field(default=0, init=False, repr=False)
     _total_failures: int = field(default=0, init=False, repr=False)
     _prev_prompt_len: int = field(default=0, init=False, repr=False)
@@ -234,6 +235,8 @@ class CriticEngine(Critic):
                 self._total_output_tokens += response.output_tokens
             if response.cached_tokens:
                 self._total_cached_tokens += response.cached_tokens
+            if response.cache_read_tokens:
+                self._total_cache_read_tokens += response.cache_read_tokens
 
             if input_tokens is not None and input_tokens > 0:
                 pre_proj = projected
@@ -299,15 +302,20 @@ class CriticEngine(Critic):
 
     def stats(self) -> dict[str, Any]:
         """Return accumulated run stats."""
+        # "% hit" is cache READS over total input — the genuinely cheap
+        # portion. cache *creation* (writes) is excluded: it's billed at a
+        # premium and is not a hit. (Older builds summed read+creation here,
+        # over-reporting the hit rate toward 100%.)
         cache_pct = 0.0
         if self._total_input_tokens > 0:
-            cache_pct = 100.0 * self._total_cached_tokens / self._total_input_tokens
+            cache_pct = 100.0 * self._total_cache_read_tokens / self._total_input_tokens
         s: dict[str, Any] = {
             "calls": self._total_calls,
             "failures": self._total_failures,
             "input_tokens": self._total_input_tokens,
             "output_tokens": self._total_output_tokens,
             "cached_tokens": self._total_cached_tokens,
+            "cache_read_tokens": self._total_cache_read_tokens,
             "cache_hit_pct": round(cache_pct, 1),
         }
         if hasattr(self.backend, "total_cost"):

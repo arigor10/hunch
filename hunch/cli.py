@@ -679,11 +679,13 @@ def _cmd_replay_offline(ns: argparse.Namespace) -> int:
             cost_str = ""
             if "total_cost_usd" in s:
                 cost_str = f" cost=${s['total_cost_usd']:.6f}"
+            read = s.get("cache_read_tokens", 0)
+            created = s.get("cached_tokens", 0) - read
             _log(
                 f"[stats] calls={s['calls']} failures={s['failures']} "
                 f"input_tokens={s['input_tokens']:,} "
-                f"cached_tokens={s['cached_tokens']:,} "
-                f"({s['cache_hit_pct']}% hit) "
+                f"cache_read={read:,} ({s['cache_hit_pct']}% hit) "
+                f"cache_created={created:,} "
                 f"output_tokens={s['output_tokens']:,}"
                 f"{cost_str}"
             )
