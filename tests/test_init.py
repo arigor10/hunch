@@ -114,6 +114,51 @@ def test_init_second_run_preserves_edited_adjacent_hook(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# gitignore isolation
+# ---------------------------------------------------------------------------
+
+def test_init_creates_gitignore_with_isolation_entries(tmp_path):
+    result = init_project(tmp_path)
+    assert set(result.gitignore_entries_added) == {
+        ".hunch/", ".claude/settings.local.json"
+    }
+    body = (tmp_path / ".gitignore").read_text()
+    assert ".hunch/" in body
+    assert ".claude/settings.local.json" in body
+
+
+def test_init_appends_to_existing_gitignore_preserving_content(tmp_path):
+    gi = tmp_path / ".gitignore"
+    gi.write_text("# my rules\n*.pyc\n.venv/\n")
+    init_project(tmp_path)
+    body = gi.read_text()
+    # Existing content preserved...
+    assert "*.pyc" in body
+    assert ".venv/" in body
+    # ...and our entries appended.
+    assert ".hunch/" in body
+    assert ".claude/settings.local.json" in body
+
+
+def test_init_gitignore_is_idempotent(tmp_path):
+    init_project(tmp_path)
+    result2 = init_project(tmp_path)
+    assert result2.gitignore_entries_added == []
+    body = (tmp_path / ".gitignore").read_text()
+    assert body.count(".hunch/") == 1
+    assert body.count(".claude/settings.local.json") == 1
+
+
+def test_init_gitignore_respects_existing_slashless_entry(tmp_path):
+    gi = tmp_path / ".gitignore"
+    gi.write_text(".hunch\n")  # no trailing slash — already covers .hunch/
+    result = init_project(tmp_path)
+    # .hunch already covered; only the settings entry is new.
+    assert result.gitignore_entries_added == [".claude/settings.local.json"]
+    assert gi.read_text().count(".hunch") == 1  # not duplicated
+
+
+# ---------------------------------------------------------------------------
 # Error paths
 # ---------------------------------------------------------------------------
 

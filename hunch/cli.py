@@ -93,6 +93,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="project directory to initialize (default: current working directory)",
     )
 
+    onb = sub.add_parser(
+        "onboard",
+        help="prepare a project for the agent-guided research setup "
+        "(materializes the onboarding kit; then run `claude` and follow it)",
+    )
+    onb.add_argument(
+        "--cwd",
+        type=Path,
+        default=None,
+        help="project directory to onboard (default: current working directory)",
+    )
+
     sub.add_parser("status", help="(planned) print replay-buffer / hunch counts")
 
     ls = sub.add_parser("list", help="print current hunches with statuses")
@@ -538,6 +550,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_mine(ns)
     if ns.command == "init":
         return _cmd_init(ns)
+    if ns.command == "onboard":
+        return _cmd_onboard(ns)
     if ns.command == "status":
         sys.stderr.write(
             "hunch status: not yet implemented (v0 skeleton).\n"
@@ -564,6 +578,27 @@ def _cmd_init(ns: argparse.Namespace) -> int:
     settings_path = cwd / ".claude" / "settings.local.json"
     sys.stdout.write(f"hunch init: {cwd}\n")
     for line in result.as_lines(replay_dir, settings_path):
+        sys.stdout.write(line + "\n")
+    return 0
+
+
+def _cmd_onboard(ns: argparse.Namespace) -> int:
+    from hunch.onboarding.onboard import onboard_project
+
+    cwd = (ns.cwd or Path.cwd()).resolve()
+    if not cwd.is_dir():
+        sys.stderr.write(f"hunch onboard: {cwd} is not a directory\n")
+        return 1
+    try:
+        result = onboard_project(cwd)
+    except OSError as e:
+        sys.stderr.write(f"hunch onboard: {e}\n")
+        return 1
+
+    sys.stdout.write(f"hunch onboard: prepared agent-guided setup in {cwd}\n")
+    for line in result.as_lines():
+        sys.stdout.write(line + "\n")
+    for line in result.kickoff_lines():
         sys.stdout.write(line + "\n")
     return 0
 

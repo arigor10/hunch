@@ -13,7 +13,7 @@ Both use the same Critic and trigger logic. This guide covers live mode first, t
 
 - Python 3.11+
 - Claude Code (the CLI tool) installed and working
-- A working Claude-Code-based research agent (the "Researcher"). If you don't have one yet: create a directory for your project, add a `CLAUDE.md` that describes the project and sets up the research-in-cycles workflow (see [example](example_claude_md.md)), and run `claude`.
+- A working Claude-Code-based research agent (the "Researcher"). If you don't have one yet: create a directory for your project, add a `CLAUDE.md` that states the project's goal and includes the shared research workflow, and run `claude`. The onboarding kit (`hunch/onboarding/`) provides a `CLAUDE.md` template and the portable `research_conventions.md` for exactly this, plus an agent-guided procedure (`onboarding.md`) that sets it up for you.
 
 ## Install
 
