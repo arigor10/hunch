@@ -46,6 +46,12 @@ Capture the direction into `vision.md` (or the project's equivalent). This is th
 important artifact — it installs the objective you'll reason against in the gaps between
 explicit instructions.
 
+**Do not invent answers the user didn't give.** If they leave a slot unanswered (scope,
+budget, autonomy, output, or a specific benchmark), say so explicitly — record it under an
+"Open questions to confirm with the advisor" heading in `vision.md`, with at most a clearly
+labelled *inferred* candidate, never confident filler. End the interview by telling the
+user **which slots you left open**, so the gap is visible rather than silently guessed.
+
 ## Step 3 — Lay down the research-process layer
 
 `hunch onboard` has already placed `research_conventions.md` in the project root (and the
@@ -71,7 +77,11 @@ literature, coding standards). Don't inline them — include them, so they stay 
   path bindings; beyond that, fold in as much of the template's shape as serves this
   project — how exactly to combine them is your call. The one hard rule: be
   non-destructive — never discard the user's own notes, and do the merge on the setup
-  branch (per the operating principles) so it's easy to review and undo.
+  branch (per the operating principles) so it's easy to review and undo. If you find
+  existing content that's factually *wrong* (e.g. a stale `claude init` map that no longer
+  matches the code), you may correct it — but make the change visible (a brief dated note on
+  what changed and why), never a silent rewrite, and only for claims that are actually
+  false, not to impose your preferences.
 
 ## Step 5 — Bind principles to this project's structure
 
@@ -85,21 +95,30 @@ better than the kit's default, flag it — the kit improves by adopting good pat
 ## Step 6 — Seed (or adopt) the docs skeleton
 
 Ensure there's a home for: the vision/direction (Step 2), a plan, a results registry, and
-a decisions log. Create empty/seeded versions where missing; adopt existing equivalents
-where present.
+a decisions log. **Prefer an existing equivalent over creating a parallel file** — if the
+repo already records results in, say, `reports/` or scattered `*-FINDINGS.md` docs, bind to
+those rather than dropping an empty `results_registry.md` beside them. Create a new home
+only when there is genuinely no equivalent. If an existing home works but is scattered (no
+single index), note that in `CLAUDE.md` as an open improvement rather than silently
+restructuring the user's docs.
 
 ## Step 7 — Install the Hunch substrate
 
-Run `hunch init` in the project. It creates the replay buffer and merges the `Stop` and
-`UserPromptSubmit` hooks into `.claude/settings.local.json` (it merges, doesn't clobber).
-Confirm both hooks landed.
+Run `hunch init` in the project. It creates the replay buffer, merges Hunch's hooks into
+`.claude/settings.local.json` (additively — it may add more than one `Stop` entry; that's
+expected), and appends `.hunch/` and `.claude/settings.local.json` to the repo's
+`.gitignore` so they don't pollute it. Confirm the hooks landed and that `.hunch/` and the
+settings file are ignored. Note for the user: the one change `init` makes to a *tracked*
+file is that `.gitignore` edit — everything else it adds is git-ignored or local.
 
 ## Step 8 — Validate
 
-Run `hunch doctor` (when available) to check prerequisites — `claude` CLI present and
-authed, API keys if needed, hooks wired, replay dir valid. Resolve anything red before
-declaring success. If `hunch doctor` isn't available yet, verify the equivalents manually
-and say which checks you ran.
+Run `hunch doctor`. It checks the prerequisites and reports each as OK / WARN / FAIL —
+`claude` CLI present, hooks wired, replay dir valid, gitignore isolation, API keys.
+**Resolve every FAIL before declaring success.** WARN items are things `doctor` could not
+verify automatically (e.g. whether the `claude` CLI is *authenticated*) — surface those to
+the user to confirm rather than assuming they pass. Never claim a check passed that
+`doctor` did not actually pass.
 
 ## Step 9 — Hand off
 

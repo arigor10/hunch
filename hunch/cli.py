@@ -105,6 +105,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="project directory to onboard (default: current working directory)",
     )
 
+    doc = sub.add_parser(
+        "doctor",
+        help="preflight health check (claude CLI, hooks, replay dir, gitignore, keys)",
+    )
+    doc.add_argument(
+        "--cwd",
+        type=Path,
+        default=None,
+        help="project directory to check (default: current working directory)",
+    )
+
     sub.add_parser("status", help="(planned) print replay-buffer / hunch counts")
 
     ls = sub.add_parser("list", help="print current hunches with statuses")
@@ -552,6 +563,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_init(ns)
     if ns.command == "onboard":
         return _cmd_onboard(ns)
+    if ns.command == "doctor":
+        return _cmd_doctor(ns)
     if ns.command == "status":
         sys.stderr.write(
             "hunch status: not yet implemented (v0 skeleton).\n"
@@ -600,6 +613,24 @@ def _cmd_onboard(ns: argparse.Namespace) -> int:
         sys.stdout.write(line + "\n")
     for line in result.kickoff_lines():
         sys.stdout.write(line + "\n")
+    return 0
+
+
+def _cmd_doctor(ns: argparse.Namespace) -> int:
+    from hunch.doctor import run_checks
+
+    cwd = (ns.cwd or Path.cwd()).resolve()
+    if not cwd.is_dir():
+        sys.stderr.write(f"hunch doctor: {cwd} is not a directory\n")
+        return 1
+    report = run_checks(cwd)
+    sys.stdout.write(f"hunch doctor: {cwd}\n")
+    for line in report.as_lines():
+        sys.stdout.write(line + "\n")
+    if not report.ok:
+        sys.stdout.write("\nSome checks failed — resolve the ✗ items above.\n")
+        return 1
+    sys.stdout.write("\nAll hard checks passed. Confirm any ⚠ items yourself.\n")
     return 0
 
 
