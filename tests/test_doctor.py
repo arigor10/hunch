@@ -11,6 +11,7 @@ from hunch.doctor import (
     DoctorReport,
     _check_api_keys,
     _check_claude_auth,
+    _check_claude_cli,
     _check_gitignore,
     _check_hooks,
     _check_replay_dir,
@@ -82,3 +83,79 @@ def test_cli_doctor_fails_on_uninitialized_project(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "hooks wired" in out
     assert "replay buffer" in out
+
+
+# --- edge cases from the cross-family review (Gemini via agy, 2026-06-19) ---
+
+def test_claude_cli_fail_when_missing(monkeypatch):
+    monkeypatch.setattr("hunch.doctor.shutil.which", lambda _: None)
+    assert _check_claude_cli().status == FAIL
+
+
+def test_claude_cli_ok_when_version_runs(monkeypatch):
+    monkeypatch.setattr("hunch.doctor.shutil.which", lambda _: "/usr/bin/claude")
+
+    class _R:
+        returncode = 0
+        stdout = "claude 9.9.9"
+        stderr = ""
+
+    monkeypatch.setattr("hunch.doctor.subprocess.run", lambda *a, **k: _R())
+    c = _check_claude_cli()
+    assert c.status == OK
+    assert "9.9.9" in c.detail
+
+
+def test_claude_cli_fail_on_timeout(monkeypatch):
+    import subprocess as _sp
+
+    monkeypatch.setattr("hunch.doctor.shutil.which", lambda _: "/usr/bin/claude")
+
+    def _boom(*a, **k):
+        raise _sp.TimeoutExpired(cmd="claude", timeout=15)
+
+    monkeypatch.setattr("hunch.doctor.subprocess.run", _boom)
+    assert _check_claude_cli().status == FAIL
+
+
+def test_claude_cli_fail_on_nonzero_exit(monkeypatch):
+    monkeypatch.setattr("hunch.doctor.shutil.which", lambda _: "/usr/bin/claude")
+
+    class _R:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr("hunch.doctor.subprocess.run", lambda *a, **k: _R())
+    assert _check_claude_cli().status == FAIL
+
+
+def test_hooks_fail_on_invalid_json(tmp_path):
+    s = tmp_path / ".claude" / "settings.local.json"
+    s.parent.mkdir(parents=True)
+    s.write_text("{ not json")
+    assert _check_hooks(tmp_path).status == FAIL
+
+
+def test_hooks_fail_on_non_dict_hooks(tmp_path):
+    s = tmp_path / ".claude" / "settings.local.json"
+    s.parent.mkdir(parents=True)
+    s.write_text('{"hooks": "not-a-dict"}')
+    assert _check_hooks(tmp_path).status == FAIL
+
+
+def test_hooks_no_crash_on_non_iterable_hook_value(tmp_path):
+    # A non-iterable hook value (int) must not crash the check — reported missing → FAIL.
+    s = tmp_path / ".claude" / "settings.local.json"
+    s.parent.mkdir(parents=True)
+    s.write_text('{"hooks": {"UserPromptSubmit": 5, "Stop": 5}}')
+    assert _check_hooks(tmp_path).status == FAIL
+
+
+def test_gitignore_warn_when_unreadable(tmp_path):
+    # .gitignore as a directory → read_text raises OSError → graceful WARN, no crash.
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").mkdir()
+    c = _check_gitignore(tmp_path)
+    assert c.status == WARN
+    assert "could not read" in c.detail

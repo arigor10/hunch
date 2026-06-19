@@ -166,6 +166,8 @@ def _merge_hooks(settings_path: Path) -> tuple[bool, list[str]]:
 
 def _hook_already_present(hook_list: list[Any], command: str) -> bool:
     """True if any entry in the hook list runs the given command."""
+    if not isinstance(hook_list, list):
+        return False  # malformed settings (non-list) → treat as not present
     for group in hook_list:
         if not isinstance(group, dict):
             continue
@@ -192,6 +194,21 @@ def _minimal_settings() -> dict[str, Any]:
     return settings
 
 
+def _gitignore_missing_entries(gitignore_text: str, entries: list[str]) -> list[str]:
+    """Which of `entries` are NOT already covered by the given .gitignore text.
+
+    Compares on stripped, slash-normalized, non-comment lines, so an existing
+    `.hunch` (no slash) counts as covering `.hunch/`. Shared with `hunch.doctor`
+    so the append logic and the health check stay consistent.
+    """
+    present = {
+        line.strip().rstrip("/")
+        for line in gitignore_text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    return [e for e in entries if e.rstrip("/") not in present]
+
+
 def _ensure_gitignore(cwd: Path) -> list[str]:
     """Idempotently ensure the project's `.gitignore` ignores Hunch's local
     artifacts. Additive: existing content is preserved byte-for-byte; the file
@@ -204,14 +221,7 @@ def _ensure_gitignore(cwd: Path) -> list[str]:
     """
     gitignore_path = cwd / ".gitignore"
     existing_text = gitignore_path.read_text() if gitignore_path.exists() else ""
-    # Compare on stripped, slash-normalized, non-comment lines so an existing
-    # `.hunch` (no slash) counts as already covering `.hunch/`.
-    present = {
-        line.strip().rstrip("/")
-        for line in existing_text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-    to_add = [e for e in _GITIGNORE_ENTRIES if e.rstrip("/") not in present]
+    to_add = _gitignore_missing_entries(existing_text, _GITIGNORE_ENTRIES)
     if not to_add:
         return []
 

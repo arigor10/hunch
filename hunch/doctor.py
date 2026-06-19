@@ -23,6 +23,7 @@ from hunch.init import (
     STOP_HOOK_COMMAND,
     UPS_HOOK_COMMAND,
     _GITIGNORE_ENTRIES,
+    _gitignore_missing_entries,
     _hook_already_present,
 )
 
@@ -153,13 +154,14 @@ def _check_gitignore(cwd: Path) -> Check:
     if not (cwd / ".git").exists():
         return Check("gitignore isolation", OK, "not a git repo (nothing to isolate)")
     gitignore = cwd / ".gitignore"
-    text = gitignore.read_text() if gitignore.exists() else ""
-    present = {
-        line.strip().rstrip("/")
-        for line in text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-    missing = [e for e in _GITIGNORE_ENTRIES if e.rstrip("/") not in present]
+    try:
+        text = gitignore.read_text() if gitignore.exists() else ""
+    except OSError as e:
+        return Check(
+            "gitignore isolation", WARN, f"could not read {gitignore} ({e})",
+            fix="ensure `.hunch/` and `.claude/settings.local.json` are git-ignored",
+        )
+    missing = _gitignore_missing_entries(text, _GITIGNORE_ENTRIES)
     if missing:
         return Check(
             "gitignore isolation", WARN, f"not ignored: {', '.join(missing)}",
