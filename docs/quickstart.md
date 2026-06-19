@@ -13,7 +13,7 @@ Both use the same Critic and trigger logic. This guide covers live mode first, t
 
 - Python 3.11+
 - Claude Code (the CLI tool) installed and working
-- A working Claude-Code-based research agent (the "Researcher"). If you don't have one yet: create a directory for your project, add a `CLAUDE.md` that states the project's goal and includes the shared research workflow, and run `claude`. The onboarding kit (`hunch/onboarding/`) provides a `CLAUDE.md` template and the portable `research_conventions.md` for exactly this, plus an agent-guided procedure (`onboarding.md`) that sets it up for you.
+- A working Claude-Code-based research agent (the "Researcher"). Don't have one yet? The **Setup** step below (`hunch onboard`) interviews you and scaffolds one — a `CLAUDE.md`, the shared research workflow, and a direction doc — for you.
 
 ## Install
 
@@ -29,17 +29,48 @@ Verify: `hunch --help` should print the available subcommands.
 
 ## Setup (once per project)
 
+There are two ways in, depending on where you're starting.
+
+### Starting fresh, or retrofitting a repo → `hunch onboard`
+
+If you're starting a new research project (or cloned a repo and want to set it up for
+agentic research), let the agent do the setup:
+
+```bash
+cd /path/to/your/project        # a new dir, or an existing repo you cloned
+hunch onboard
+```
+
+`hunch onboard` materializes the onboarding kit at known paths and prints a one-line
+kickoff. Then start Claude and hand it the procedure:
+
+```bash
+claude
+# then tell it: Follow .hunch/onboarding/onboarding.md to set up this project for agentic research.
+```
+
+The agent interviews you about your research direction, writes a `CLAUDE.md` + `vision.md`,
+binds to your repo's existing conventions, wires Hunch's hooks (via `hunch init`), and
+validates with `hunch doctor` — all **non-destructively** (it won't clobber an existing
+repo, works on a `hunch-setup` branch, and keeps Hunch's local files out of git). When it
+finishes, skip to [Running the Critic](#running-the-critic-live).
+
+### Already have a `CLAUDE.md` research agent → `hunch init`
+
+If you already run Claude Code on a research project and just want to add the Critic
+substrate directly:
+
 ```bash
 cd /path/to/your/project
 hunch init
 ```
 
-This does three things:
-1. Creates `.hunch/replay/` — the event log that drives both live and offline evaluation (see [framework architecture](framework_v0.md) for details).
-2. Merges a `Stop` hook into `.claude/settings.local.json` — this will trigger the Critic once finishes a turn, after a brief silence.
-3. Merges a `UserPromptSubmit` hook into the same file — so pending hunches are injected into the Researcher's context when you type.
+`hunch init` (which `hunch onboard` also runs under the hood):
+1. Creates `.hunch/replay/` — the event log that drives both live and offline evaluation (see [framework architecture](framework_v0.md)).
+2. Merges the `Stop` and `UserPromptSubmit` hooks into `.claude/settings.local.json` (additively) — the Critic fires after Claude finishes a turn, and approved hunches are injected into the Researcher's context.
+3. Appends `.hunch/` and `.claude/settings.local.json` to your `.gitignore` so Hunch's local files don't pollute the repo.
 
-Verify with `cat .claude/settings.local.json` — you should see both a `UserPromptSubmit` hook entry pointing to `hunch hook user-prompt-submit` and a `Stop` hook entry pointing to `hunch hook stop`.
+Verify your setup anytime with **`hunch doctor`** — it reports OK / WARN / FAIL for the `claude` CLI, hooks, replay dir, gitignore isolation, and API keys (and never claims to have checked something it couldn't, like whether the CLI is authenticated).
 
 # Running the Critic (live)
 
