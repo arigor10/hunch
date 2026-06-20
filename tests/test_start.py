@@ -7,6 +7,7 @@ from hunch.start import (
     _manual_instructions,
     _new_session_commands,
     _parse_roles,
+    _research_is_idle,
     _run_command,
     start,
 )
@@ -38,6 +39,14 @@ def test_new_session_commands_layout():
 def test_parse_roles_skips_untagged():
     out = "%1 research\n%2 panel\n%3 \n%4 run\n"
     assert _parse_roles(out) == {"research": "%1", "panel": "%2", "run": "%4"}
+
+
+def test_research_is_idle():
+    assert _research_is_idle(None, None) is True       # no research pane yet
+    assert _research_is_idle("%1", "bash") is True      # fell back to an idle shell
+    assert _research_is_idle("%1", "zsh") is True
+    assert _research_is_idle("%1", "node") is False     # Claude (node) running
+    assert _research_is_idle("%1", "claude") is False
 
 
 def test_manual_instructions_lists_all_three():

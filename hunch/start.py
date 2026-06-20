@@ -73,6 +73,26 @@ def _tag_pane(pane_id: str, role: str) -> None:
     )
 
 
+_SHELLS = {"bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "csh"}
+
+
+def _pane_command(pane_id: str) -> str:
+    """The pane's foreground command (e.g. 'node' while Claude runs, 'bash' when idle)."""
+    return subprocess.run(
+        ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_current_command}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _research_is_idle(research_id: str | None, pane_command: str | None) -> bool:
+    """True when there's no live research agent — either no research pane, or the
+    tagged pane has fallen back to an idle shell (Claude was stopped). The research
+    pane is the user's persistent shell, so role-existence alone can't tell us."""
+    if research_id is None:
+        return True
+    return pane_command in _SHELLS
+
+
 def _manual_instructions(run_cmd: str) -> str:
     return (
         "tmux not found — set up the layout by hand (research left; the two Hunch\n"
@@ -134,16 +154,27 @@ def _start_inside_tmux(cwd: str, run_cmd: str) -> int:
         ).stdout.strip()
         _tag_pane(run_pane, "run")
 
-    # Research (claude): only when there isn't one already.
-    if "research" not in roles:
-        _tag_pane(cur, "research")
-        # Interactive caller → turn the current pane into the (resumed) agent. The
-        # onboarding agent (non-TTY) leaves it alone; Claude is already there.
+    # Research (claude): (re)launch when there's no research pane, or the tagged one
+    # has fallen back to an idle shell (you stopped Claude).
+    research_id = roles.get("research")
+    pane_cmd = _pane_command(research_id) if research_id else None
+    if _research_is_idle(research_id, pane_cmd):
+        target = research_id or cur
+        _tag_pane(target, "research")
+        research_pane = target
+        # Interactive caller → (re)launch the resumed agent. The onboarding agent
+        # (non-TTY) only ever lands here on first run, when Claude is already there.
         if sys.stdout.isatty() and shutil.which("claude"):
-            subprocess.run(["tmux", "select-pane", "-t", cur], check=True)
-            os.chdir(cwd)
-            os.execvp("bash", ["bash", "-c", RESEARCH_CMD])  # replaces this process
-        research_pane = cur
+            if target == cur:
+                subprocess.run(["tmux", "select-pane", "-t", cur], check=True)
+                os.chdir(cwd)
+                os.execvp("bash", ["bash", "-c", RESEARCH_CMD])  # replaces this process
+            else:
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", target, RESEARCH_CMD, "Enter"], check=True
+                )
+    else:
+        research_pane = research_id
 
     subprocess.run(["tmux", "select-pane", "-t", research_pane], check=True)
     sys.stdout.write("hunch start: workspace ready (added only what was missing).\n")
