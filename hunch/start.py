@@ -84,13 +84,16 @@ def _pane_command(pane_id: str) -> str:
     ).stdout.strip()
 
 
-def _research_is_idle(research_id: str | None, pane_command: str | None) -> bool:
-    """True when there's no live research agent — either no research pane, or the
-    tagged pane has fallen back to an idle shell (Claude was stopped). The research
-    pane is the user's persistent shell, so role-existence alone can't tell us."""
-    if research_id is None:
-        return True
-    return pane_command in _SHELLS
+def _other_research_is_live(research_id: str | None, cur_pane: str,
+                            pane_command: str | None) -> bool:
+    """True if a research pane OTHER than the current one is running a live agent
+    (not an idle shell). The current pane is deliberately skipped: when `hunch start`
+    runs interactively it IS the user's shell, and its foreground command is `hunch
+    start` itself (python) — not Claude — so its command tells us nothing. We just
+    know it's a shell the user is sitting at, ready to host the (resumed) agent."""
+    if research_id is None or research_id == cur_pane:
+        return False
+    return pane_command not in _SHELLS
 
 
 def _manual_instructions(run_cmd: str) -> str:
@@ -154,27 +157,24 @@ def _start_inside_tmux(cwd: str, run_cmd: str) -> int:
         ).stdout.strip()
         _tag_pane(run_pane, "run")
 
-    # Research (claude): (re)launch when there's no research pane, or the tagged one
-    # has fallen back to an idle shell (you stopped Claude).
+    # Research (claude): host the agent in the current pane unless a *different* pane
+    # already has Claude live. (Don't inspect the current pane's command — when run
+    # interactively it's the user's shell running `hunch start`.)
     research_id = roles.get("research")
-    pane_cmd = _pane_command(research_id) if research_id else None
-    if _research_is_idle(research_id, pane_cmd):
-        target = research_id or cur
-        _tag_pane(target, "research")
-        research_pane = target
-        # Interactive caller → (re)launch the resumed agent. The onboarding agent
-        # (non-TTY) only ever lands here on first run, when Claude is already there.
-        if sys.stdout.isatty() and shutil.which("claude"):
-            if target == cur:
-                subprocess.run(["tmux", "select-pane", "-t", cur], check=True)
-                os.chdir(cwd)
-                os.execvp("bash", ["bash", "-c", RESEARCH_CMD])  # replaces this process
-            else:
-                subprocess.run(
-                    ["tmux", "send-keys", "-t", target, RESEARCH_CMD, "Enter"], check=True
-                )
-    else:
+    other_cmd = (
+        _pane_command(research_id) if (research_id and research_id != cur) else None
+    )
+    if _other_research_is_live(research_id, cur, other_cmd):
         research_pane = research_id
+    else:
+        _tag_pane(cur, "research")
+        research_pane = cur
+        # Interactive → (re)launch the resumed agent right here. A non-TTY caller
+        # (the onboarding agent) is already Claude in this pane, so leave it.
+        if sys.stdout.isatty() and shutil.which("claude"):
+            subprocess.run(["tmux", "select-pane", "-t", cur], check=True)
+            os.chdir(cwd)
+            os.execvp("bash", ["bash", "-c", RESEARCH_CMD])  # replaces this process
 
     subprocess.run(["tmux", "select-pane", "-t", research_pane], check=True)
     sys.stdout.write("hunch start: workspace ready (added only what was missing).\n")

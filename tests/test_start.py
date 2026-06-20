@@ -6,8 +6,8 @@ from hunch.cli import main as cli_main
 from hunch.start import (
     _manual_instructions,
     _new_session_commands,
+    _other_research_is_live,
     _parse_roles,
-    _research_is_idle,
     _run_command,
     start,
 )
@@ -41,12 +41,15 @@ def test_parse_roles_skips_untagged():
     assert _parse_roles(out) == {"research": "%1", "panel": "%2", "run": "%4"}
 
 
-def test_research_is_idle():
-    assert _research_is_idle(None, None) is True       # no research pane yet
-    assert _research_is_idle("%1", "bash") is True      # fell back to an idle shell
-    assert _research_is_idle("%1", "zsh") is True
-    assert _research_is_idle("%1", "node") is False     # Claude (node) running
-    assert _research_is_idle("%1", "claude") is False
+def test_other_research_is_live():
+    # no research pane, or it's the current pane → nothing live "elsewhere"
+    assert _other_research_is_live(None, "%9", None) is False
+    assert _other_research_is_live("%9", "%9", "python3") is False  # current pane, skipped
+    # a different research pane running Claude (node) → live elsewhere
+    assert _other_research_is_live("%1", "%9", "node") is True
+    assert _other_research_is_live("%1", "%9", "claude") is True
+    # a different research pane that's just an idle shell → not live
+    assert _other_research_is_live("%1", "%9", "bash") is False
 
 
 def test_manual_instructions_lists_all_three():
