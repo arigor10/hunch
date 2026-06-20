@@ -16,6 +16,7 @@ Behaviour by context (never forces tmux):
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -29,7 +30,7 @@ RESEARCH_CMD = "claude --continue || claude"
 
 
 def _run_command(config: str | None) -> str:
-    return f"hunch run --config {config}" if config else "hunch run"
+    return f"hunch run --config {shlex.quote(config)}" if config else "hunch run"
 
 
 def _new_session_commands(cwd: str, run_cmd: str) -> list[list[str]]:
@@ -73,7 +74,7 @@ def _tag_pane(pane_id: str, role: str) -> None:
     )
 
 
-_SHELLS = {"bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "csh"}
+_SHELLS = {"bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "pwsh", "xonsh"}
 
 
 def _pane_command(pane_id: str) -> str:
@@ -157,9 +158,10 @@ def _start_inside_tmux(cwd: str, run_cmd: str) -> int:
         ).stdout.strip()
         _tag_pane(run_pane, "run")
 
-    # Research (claude): host the agent in the current pane unless a *different* pane
-    # already has Claude live. (Don't inspect the current pane's command — when run
-    # interactively it's the user's shell running `hunch start`.)
+    # Research (claude): (re)launch the agent. Prefer the existing research pane; claim
+    # the current pane only if there's no research pane yet (so running `hunch start` from
+    # a panel/run pane doesn't hijack it). Don't inspect the current pane's command — when
+    # run interactively it's the user's shell running `hunch start`.
     research_id = roles.get("research")
     other_cmd = (
         _pane_command(research_id) if (research_id and research_id != cur) else None
@@ -167,14 +169,24 @@ def _start_inside_tmux(cwd: str, run_cmd: str) -> int:
     if _other_research_is_live(research_id, cur, other_cmd):
         research_pane = research_id
     else:
-        _tag_pane(cur, "research")
-        research_pane = cur
-        # Interactive → (re)launch the resumed agent right here. A non-TTY caller
-        # (the onboarding agent) is already Claude in this pane, so leave it.
-        if sys.stdout.isatty() and shutil.which("claude"):
-            subprocess.run(["tmux", "select-pane", "-t", cur], check=True)
-            os.chdir(cwd)
-            os.execvp("bash", ["bash", "-c", RESEARCH_CMD])  # replaces this process
+        target = research_id or cur
+        _tag_pane(target, "research")
+        research_pane = target
+        if sys.stdout.isatty():
+            if not shutil.which("claude"):
+                sys.stdout.write(
+                    "hunch start: `claude` not found on PATH — panel/run are up; install "
+                    "Claude Code and start it in the research pane.\n"
+                )
+            elif target == cur:
+                subprocess.run(["tmux", "select-pane", "-t", cur], check=True)
+                os.chdir(cwd)
+                os.execvp("bash", ["bash", "-c", RESEARCH_CMD])  # replaces this process
+            else:
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", target, RESEARCH_CMD, "Enter"], check=True
+                )
+        # A non-TTY caller (the onboarding agent) is already Claude in this pane.
 
     subprocess.run(["tmux", "select-pane", "-t", research_pane], check=True)
     sys.stdout.write("hunch start: workspace ready (added only what was missing).\n")

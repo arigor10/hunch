@@ -202,11 +202,11 @@ def _gitignore_missing_entries(gitignore_text: str, entries: list[str]) -> list[
     so the append logic and the health check stay consistent.
     """
     present = {
-        line.strip().rstrip("/")
+        line.strip().strip("/")
         for line in gitignore_text.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
-    return [e for e in entries if e.rstrip("/") not in present]
+    return [e for e in entries if e.strip("/") not in present]
 
 
 def _ensure_gitignore(cwd: Path) -> list[str]:

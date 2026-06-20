@@ -16,6 +16,8 @@ from hunch.start import (
 def test_run_command_default_and_config():
     assert _run_command(None) == "hunch run"
     assert _run_command("configs/x.toml") == "hunch run --config configs/x.toml"
+    # config paths with spaces are shell-quoted
+    assert _run_command("my dir/x.toml") == "hunch run --config 'my dir/x.toml'"
 
 
 def test_new_session_commands_layout():

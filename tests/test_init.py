@@ -158,6 +158,13 @@ def test_init_gitignore_respects_existing_slashless_entry(tmp_path):
     assert gi.read_text().count(".hunch") == 1  # not duplicated
 
 
+def test_init_gitignore_respects_rooted_entry(tmp_path):
+    gi = tmp_path / ".gitignore"
+    gi.write_text("/.hunch/\n")  # rooted form still covers .hunch/ → no duplicate
+    result = init_project(tmp_path)
+    assert ".hunch/" not in result.gitignore_entries_added
+
+
 # ---------------------------------------------------------------------------
 # Error paths
 # ---------------------------------------------------------------------------
