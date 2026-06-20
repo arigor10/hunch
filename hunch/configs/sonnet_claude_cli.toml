@@ -1,0 +1,15 @@
+# Bundled default critic config for `hunch run` (used when no --critic/--config is
+# given). Sonnet 4.5 via the `claude` CLI — uses your Claude subscription, no API key.
+# Mirrors the repo-root configs/sonnet_claude_cli.toml; keep the two in sync.
+[backend]
+type = "claude_cli"
+model = "claude-sonnet-4-5-20250929"
+
+[backend.params]
+timeout_s = 600
+
+[engine]
+low_watermark = 140000
+high_watermark = 180000
+max_consecutive_failures = 3
+min_tick_interval_s = 180

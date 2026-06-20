@@ -38,6 +38,7 @@ exclude = ["tests*"]
 "hunch.critic" = ["prompts/*.md"]
 "hunch.mine" = ["prompts/*.md"]
 "hunch.onboarding" = ["*.md"]
+"hunch.configs" = ["*.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

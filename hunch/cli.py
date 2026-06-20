@@ -68,10 +68,11 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--critic",
         choices=("stub", "sonnet", "sonnet-dry"),
-        default="stub",
-        help="critic implementation (default: stub — emits nothing). "
-        "sonnet = accumulating v0.1 (shells out to `claude --print`). "
-        "sonnet-dry = v0.1 with no model call (logs prompt sizes only).",
+        default=None,
+        help="critic implementation. Default (no flag): the bundled Sonnet "
+        "accumulator via the `claude` CLI — uses your Claude subscription, no API "
+        "key. stub = emits nothing; sonnet = built-in v0.1 accumulator; "
+        "sonnet-dry = v0.1 with no model call.",
     )
     run.add_argument(
         "--config",
@@ -1340,15 +1341,37 @@ def _critic_label(ns: argparse.Namespace) -> str:
     return ns.critic
 
 
+def _load_default_config():
+    """Load the bundled default critic config (Sonnet via the `claude` CLI)."""
+    from importlib.resources import as_file, files
+
+    from hunch.backend import load_config
+
+    with as_file(files("hunch.configs") / "sonnet_claude_cli.toml") as p:
+        return load_config(p)
+
+
 def _resolve_critic_factory(
-    name: str, log, config_path: Path | None = None, ns: argparse.Namespace | None = None,
+    name: str | None, log, config_path: Path | None = None,
+    ns: argparse.Namespace | None = None,
 ):
-    """Map a --critic name (or --config path) to a zero-arg factory."""
+    """Map a --critic name (or --config path) to a zero-arg factory.
+
+    With neither --critic nor --config (the `hunch run` default), fall back to the
+    bundled Sonnet-via-claude-CLI config, so a fresh project gets a real critic with
+    no API key and no config file of its own.
+    """
+    full = None
     if config_path is not None:
-        from hunch.backend import load_backend, load_config
+        from hunch.backend import load_config
+        full = load_config(config_path)
+    elif name is None:
+        full = _load_default_config()
+
+    if full is not None:
+        from hunch.backend import load_backend
         from hunch.critic.engine import CriticEngine, CriticEngineConfig
 
-        full = load_config(config_path)
         def _factory():
             backend = load_backend(full.backend, log=log)
             engine_config = CriticEngineConfig(
