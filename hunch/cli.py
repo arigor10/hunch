@@ -544,7 +544,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         return 1
     _log(f"hunch run: following {runner.transcript_path}")
     _log(f"           replay={config.resolved_replay_dir()}")
-    _log(f"           critic={type(runner.critic).__name__}")
+    _log(f"           critic={type(runner.critic).__name__} — {_critic_label(ns)}")
     _log(f"           trigger=claude-stopped (debounce={trigger_cfg.min_debounce_s}s)")
     _log(f"           filter={'on' if config.filter_enabled else 'off'}")
     _log(f"           poll={config.poll_s}s")
@@ -1338,6 +1338,9 @@ def _critic_label(ns: argparse.Namespace) -> str:
         from hunch.backend.config import load_config
         full = load_config(ns.config)
         return f"{full.backend.type}:{full.backend.model} (via {ns.config.name})"
+    if getattr(ns, "critic", None) is None:
+        full = _load_default_config()
+        return f"{full.backend.type}:{full.backend.model} (bundled default)"
     return ns.critic
 
 

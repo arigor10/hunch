@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from hunch.cli import _load_default_config, _resolve_critic_factory
+import argparse
+
+from hunch.cli import _critic_label, _load_default_config, _resolve_critic_factory
 from hunch.critic.stub import StubCritic
 
 
@@ -28,3 +30,16 @@ def test_explicit_stub_still_resolves_to_stub():
     # An explicit --critic stub must still mean stub (not the new default).
     factory = _resolve_critic_factory("stub", log=_noop_log, config_path=None)
     assert factory is StubCritic
+
+
+def test_critic_label_describes_the_default():
+    ns = argparse.Namespace(config=None, critic=None)
+    label = _critic_label(ns)
+    assert "claude_cli" in label
+    assert "sonnet" in label
+    assert "bundled default" in label
+
+
+def test_critic_label_explicit_name():
+    ns = argparse.Namespace(config=None, critic="stub")
+    assert _critic_label(ns) == "stub"
