@@ -4,9 +4,30 @@ Catches the moments in your agentic research that don't quite add up — before 
 
 Hunch is an early-stage open source project exploring runtime critique for agentic research workflows — a "meeting-room colleague" that watches a research session unfold and surfaces hunches about things worth a second look.
 
+## Get started
+
+**1. Install** — `pipx install hunch` (or `pip install -e .` from a clone).
+
+**2. Set up your project — the agent does it for you:**
+
+```bash
+cd /path/to/your/project
+hunch onboard
+```
+
+This launches Claude, which **interviews you about your research direction** and scaffolds everything — your `CLAUDE.md`, the research workflow, and Hunch's capture hooks — non-destructively (it works fine on an existing repo you cloned).
+
+**3. Open your workspace:**
+
+```bash
+hunch start
+```
+
+Your research agent on the left; the critic's panel and live run stacked on the right. That's it — Hunch now watches your research and surfaces hunches as you work.
+
 ## Documentation
 
-- **[Quickstart](docs/quickstart.md)** — get Hunch running on your project in 5 minutes. Covers live mode, offline replay, the annotation UI, and the label bank.
+- **[User Guide](docs/guide.md)** — the full reference: live + offline modes, the annotation UI, the label bank, custom models, and troubleshooting.
 - **[VISION.md](VISION.md)** — the framing, the bet, and the design decisions behind Hunch.
 - **[Critic Roadmap](docs/critic_roadmap.md)** — the three-generation plan for the Critic (v0 → v1 → v2).
 - **[Framework v0](docs/framework_v0.md)** — architecture of the capture + trigger + critic loop.

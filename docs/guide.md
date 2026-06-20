@@ -1,4 +1,7 @@
-# Quickstart
+# User Guide
+
+*New here? The README's **Get started** is all you need to begin — `hunch onboard` and the
+agent does the rest. This guide is the deeper reference for when you want it.*
 
 Hunch runs in two modes:
 
