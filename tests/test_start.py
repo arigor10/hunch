@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from hunch.cli import main as cli_main
 from hunch.start import (
-    _inside_tmux_commands,
     _manual_instructions,
     _new_session_commands,
+    _parse_roles,
     _run_command,
     start,
 )
@@ -28,22 +28,16 @@ def test_new_session_commands_layout():
     assert cmds[1][-1] == "hunch panel"
     assert cmds[2][1:3] == ["split-window", "-v"]
     assert cmds[2][-1] == "hunch run"
+    # the three panes are tagged with their roles (for idempotent re-runs)
+    tagged = {c[-1] for c in cmds if c[1] == "set-option"}
+    assert tagged == {"research", "panel", "run"}
     # research (left) pane is focused at the end
     assert cmds[-1][1] == "select-pane"
 
 
-def test_inside_tmux_commands_keep_current_pane():
-    cmds = _inside_tmux_commands("/proj", "hunch run", "%5")
-    flat = [tok for c in cmds for tok in c]
-    # never spawns a new session / window / claude — the live session stays put
-    assert "new-session" not in flat
-    assert "new-window" not in flat
-    assert "claude" not in flat
-    assert cmds[0][-1] == "hunch panel"
-    assert cmds[1][-1] == "hunch run"
-    # split relative to the current pane; focus returns to it
-    assert "%5" in cmds[0]
-    assert cmds[-1] == ["tmux", "select-pane", "-t", "%5"]
+def test_parse_roles_skips_untagged():
+    out = "%1 research\n%2 panel\n%3 \n%4 run\n"
+    assert _parse_roles(out) == {"research": "%1", "panel": "%2", "run": "%4"}
 
 
 def test_manual_instructions_lists_all_three():

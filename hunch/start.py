@@ -41,18 +41,36 @@ def _new_session_commands(cwd: str, run_cmd: str) -> list[list[str]]:
         ["tmux", "new-session", "-d", "-s", SESSION, "-c", cwd, RESEARCH_CMD],
         ["tmux", "split-window", "-h", "-l", RIGHT_COLUMN, "-t", f"{w}.0", "-c", cwd, "hunch panel"],
         ["tmux", "split-window", "-v", "-t", f"{w}.1", "-c", cwd, run_cmd],
+        ["tmux", "set-option", "-p", "-t", f"{w}.0", "@hunch_role", "research"],
+        ["tmux", "set-option", "-p", "-t", f"{w}.1", "@hunch_role", "panel"],
+        ["tmux", "set-option", "-p", "-t", f"{w}.2", "@hunch_role", "run"],
         ["tmux", "select-pane", "-t", f"{w}.0"],
     ]
 
 
-def _inside_tmux_commands(cwd: str, run_cmd: str, cur_pane: str) -> list[list[str]]:
-    """Add the two Hunch panes beside the current pane — no new session, window, or
-    claude, so the running research session stays put."""
-    return [
-        ["tmux", "split-window", "-h", "-l", RIGHT_COLUMN, "-t", cur_pane, "-c", cwd, "hunch panel"],
-        ["tmux", "split-window", "-v", "-c", cwd, run_cmd],  # splits the active (panel) pane
-        ["tmux", "select-pane", "-t", cur_pane],
-    ]
+def _parse_roles(list_panes_output: str) -> dict[str, str]:
+    """Map `@hunch_role` -> pane_id from `tmux list-panes -F "#{pane_id} #{@hunch_role}"`.
+    Untagged panes (empty role) are skipped. Lets a re-run see what's already present."""
+    roles: dict[str, str] = {}
+    for line in list_panes_output.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            roles[parts[1]] = parts[0]
+    return roles
+
+
+def _window_roles() -> dict[str, str]:
+    out = subprocess.run(
+        ["tmux", "list-panes", "-F", "#{pane_id} #{@hunch_role}"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    return _parse_roles(out)
+
+
+def _tag_pane(pane_id: str, role: str) -> None:
+    subprocess.run(
+        ["tmux", "set-option", "-p", "-t", pane_id, "@hunch_role", role], check=True
+    )
 
 
 def _manual_instructions(run_cmd: str) -> str:
@@ -87,21 +105,48 @@ def start(cwd: Path, config: str | None = None, attach: bool = True) -> int:
 
 
 def _start_inside_tmux(cwd: str, run_cmd: str) -> int:
+    """Add only the missing Hunch panes beside the current pane. Idempotent: panes
+    we created carry an `@hunch_role` tag, so a re-run fills in only what's gone
+    (a closed run pane, a not-yet-started claude) and never duplicates."""
     cur = subprocess.run(
         ["tmux", "display-message", "-p", "#{pane_id}"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
-    for cmd in _inside_tmux_commands(cwd, run_cmd, cur):
-        subprocess.run(cmd, check=True)
-    # If a person is driving this interactively, turn their current pane into the
-    # (resumed) research agent. If a non-TTY caller ran it — e.g. the onboarding
-    # agent from its own bash — leave the pane alone; Claude is already there.
-    if sys.stdout.isatty() and shutil.which("claude"):
-        os.chdir(cwd)
-        os.execvp("bash", ["bash", "-c", RESEARCH_CMD])  # replaces this process
-    sys.stdout.write(
-        "hunch start: added `hunch panel` + `hunch run` beside your current pane.\n"
-    )
+    roles = _window_roles()
+    research_pane = roles.get("research", cur)
+
+    # Panel (top-right): create beside the research pane only if absent.
+    if "panel" not in roles:
+        panel = subprocess.run(
+            ["tmux", "split-window", "-h", "-l", RIGHT_COLUMN, "-t", research_pane,
+             "-c", cwd, "-P", "-F", "#{pane_id}", "hunch panel"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        _tag_pane(panel, "panel")
+        roles["panel"] = panel
+
+    # Run (below the panel): create only if absent.
+    if "run" not in roles:
+        run_pane = subprocess.run(
+            ["tmux", "split-window", "-v", "-t", roles["panel"],
+             "-c", cwd, "-P", "-F", "#{pane_id}", run_cmd],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        _tag_pane(run_pane, "run")
+
+    # Research (claude): only when there isn't one already.
+    if "research" not in roles:
+        _tag_pane(cur, "research")
+        # Interactive caller → turn the current pane into the (resumed) agent. The
+        # onboarding agent (non-TTY) leaves it alone; Claude is already there.
+        if sys.stdout.isatty() and shutil.which("claude"):
+            subprocess.run(["tmux", "select-pane", "-t", cur], check=True)
+            os.chdir(cwd)
+            os.execvp("bash", ["bash", "-c", RESEARCH_CMD])  # replaces this process
+        research_pane = cur
+
+    subprocess.run(["tmux", "select-pane", "-t", research_pane], check=True)
+    sys.stdout.write("hunch start: workspace ready (added only what was missing).\n")
     return 0
 
 
