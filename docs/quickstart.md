@@ -179,7 +179,11 @@ A fallback `UserPromptSubmit` hook also checks for approved hunches when you sen
 
 ## tmux layout (recommended)
 
-For a comfortable setup, split your terminal into panes:
+**The easy way:** `hunch start` builds this layout for you — the research agent on the
+left, `hunch panel` and `hunch run` stacked on the right. It detects whether you're already
+inside tmux, and falls back to printed instructions if tmux isn't installed.
+
+To set it up by hand instead, split your terminal into panes:
 
 ```
 +----------------------------------+------------------+

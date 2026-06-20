@@ -104,6 +104,22 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="project directory to onboard (default: current working directory)",
     )
+    onb.add_argument(
+        "--no-launch",
+        action="store_true",
+        help="don't auto-launch Claude after preparing; just print the kickoff",
+    )
+
+    st = sub.add_parser(
+        "start",
+        help="open the working tmux layout (research agent + hunch panel + hunch run)",
+    )
+    st.add_argument("--cwd", type=Path, default=None,
+                    help="project directory (default: current working directory)")
+    st.add_argument("--config", type=str, default=None,
+                    help="config file passed through to `hunch run`")
+    st.add_argument("--no-attach", action="store_true",
+                    help="create/prepare the layout but don't attach to tmux")
 
     doc = sub.add_parser(
         "doctor",
@@ -563,6 +579,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_init(ns)
     if ns.command == "onboard":
         return _cmd_onboard(ns)
+    if ns.command == "start":
+        return _cmd_start(ns)
     if ns.command == "doctor":
         return _cmd_doctor(ns)
     if ns.command == "status":
@@ -611,9 +629,29 @@ def _cmd_onboard(ns: argparse.Namespace) -> int:
     sys.stdout.write(f"hunch onboard: prepared agent-guided setup in {cwd}\n")
     for line in result.as_lines():
         sys.stdout.write(line + "\n")
+
+    import os
+    import shutil
+
+    rel = result.procedure_path.relative_to(result.cwd)
+    kickoff = f"Follow {rel} to set up this project for agentic research."
+    if not ns.no_launch and sys.stdout.isatty() and shutil.which("claude"):
+        sys.stdout.write("\nLaunching Claude (pass --no-launch to skip)…\n")
+        os.chdir(cwd)
+        os.execvp("claude", ["claude", kickoff])  # hands off to interactive Claude
     for line in result.kickoff_lines():
         sys.stdout.write(line + "\n")
     return 0
+
+
+def _cmd_start(ns: argparse.Namespace) -> int:
+    from hunch.start import start
+
+    cwd = (ns.cwd or Path.cwd()).resolve()
+    if not cwd.is_dir():
+        sys.stderr.write(f"hunch start: {cwd} is not a directory\n")
+        return 1
+    return start(cwd, config=ns.config, attach=not ns.no_attach)
 
 
 def _cmd_doctor(ns: argparse.Namespace) -> int:

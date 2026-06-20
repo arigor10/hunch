@@ -122,14 +122,17 @@ the user to confirm rather than assuming they pass. Never claim a check passed t
 
 ## Step 9 — Hand off
 
-Summarize what you set up and what changed (a short diff overview). Tell the user how to
-start: open the tmux layout (research agent + `hunch panel` + `hunch run`; see the
-quickstart) and begin a research cycle. Remind them nothing was committed or pushed.
+Summarize what you set up and what changed (a short diff overview). Then open the working
+layout: **if you're running inside tmux** (check `$TMUX`), run `hunch start` yourself — it
+adds the `hunch panel` and `hunch run` panes *beside your current pane*, so this session
+keeps running untouched. **If not in tmux**, tell the user to run `hunch start` (it opens a
+fresh tmux session with the research agent + both panes). Then they can begin a research
+cycle. Remind them nothing was committed or pushed.
 
 A word on permissions, offered gently: Claude Code will ask for approval before running
 commands — that's a safety feature, not a glitch. Let the user know the prompts are
 expected, and that if the case-by-case approvals start to wear on them they can reduce the
 friction at any time — by allowlisting the commands they keep approving, or, once they're
 comfortable, granting broader permission — in `.claude/settings.local.json`. Don't push,
-and never grant permissions on their behalf; the point is only that they shouldn't be
-surprised or worn down into giving up.
+and don't grant permissions on their behalf unless they explicitly ask you to; the point is
+only that they shouldn't be surprised or worn down into giving up.
