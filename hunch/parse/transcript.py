@@ -173,10 +173,14 @@ def _parse_lines_to_records(lines: Iterable[str], starting_line_num: int = 0) ->
         # These appear as queue-operation or attachment records containing
         # <hunch-injection> in their content/prompt.
         if rec_type in ("queue-operation", "attachment"):
-            payload = d.get("content", "") or ""
+            # content (and attachment.prompt) may be a plain string OR a list of
+            # content blocks; normalize to text via _extract_text so the regex
+            # never sees a non-string (was: TypeError on list content).
+            payload = _extract_text(d.get("content", ""))
             if not payload:
                 att = d.get("attachment", {})
-                payload = att.get("prompt", "") if isinstance(att, dict) else ""
+                prompt = att.get("prompt", "") if isinstance(att, dict) else ""
+                payload = _extract_text(prompt)
             if _HUNCH_INJECTION_RE.search(payload):
                 records.append({
                     "line": starting_line_num + offset,

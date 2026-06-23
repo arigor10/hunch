@@ -296,6 +296,40 @@ def test_hunch_injection_detected_from_attachment(transcript_factory, project_ro
     assert set(injections[0]["hunch_ids"]) == {"h-0001", "h-0002"}
 
 
+def test_hunch_injection_detected_when_content_is_list_of_blocks(transcript_factory, project_root):
+    """Regression: queue-operation/attachment `content` can be a list of content
+    blocks, not just a string. The injection-detection path must normalize it via
+    _extract_text instead of crashing (was: TypeError: expected string, got list)."""
+    rec = {
+        "type": "queue-operation",
+        "operation": "enqueue",
+        "timestamp": "2026-05-28T03:07:00Z",
+        "content": [
+            {"type": "text",
+             "text": "<hunch-injection>\n- [h-0042] cache miss\n</hunch-injection>"},
+        ],
+    }
+    path = transcript_factory([rec])
+    events, _ = parse_whole_file(path, project_roots=[project_root])
+    injections = [e for e in events if e["type"] == "hunch_injection"]
+    assert len(injections) == 1
+    assert injections[0]["hunch_ids"] == ["h-0042"]
+
+
+def test_list_content_without_injection_does_not_crash(transcript_factory, project_root):
+    """A list `content` with no text/injection must parse cleanly — no TypeError,
+    no false injection."""
+    rec = {
+        "type": "queue-operation",
+        "operation": "enqueue",
+        "timestamp": "2026-05-28T03:07:30Z",
+        "content": [{"type": "tool_use", "id": "x", "name": "Bash", "input": {}}],
+    }
+    path = transcript_factory([rec])
+    events, _ = parse_whole_file(path, project_roots=[project_root])
+    assert [e for e in events if e["type"] == "hunch_injection"] == []
+
+
 def test_hunch_response_detected_in_assistant_text(transcript_factory, project_root):
     path = transcript_factory([
         transcript_factory.assistant_text(

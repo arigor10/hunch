@@ -34,6 +34,10 @@ UPS_HOOK_COMMAND = "hunch hook user-prompt-submit"
 STOP_HOOK_COMMAND = "hunch hook stop"
 STOP_DELIVERY_HOOK_COMMAND = "hunch hook async-delivery"
 
+# Local, machine-specific artifacts that must never be committed into the
+# project's repo — especially when retrofitting someone else's clone.
+_GITIGNORE_ENTRIES = [".hunch/", ".claude/settings.local.json"]
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -49,6 +53,7 @@ class InitResult:
     replay_dir_created: bool
     settings_file_created: bool
     hooks_added: list[str]
+    gitignore_entries_added: list[str]
     already_initialized: bool
 
     def as_lines(self, replay_dir: Path, settings_path: Path) -> list[str]:
@@ -66,6 +71,10 @@ class InitResult:
             lines.append(f"  updated  {settings_path} (added {added} hook(s))")
         else:
             lines.append(f"  unchanged {settings_path}")
+        gitignore_path = settings_path.parent.parent / ".gitignore"
+        if self.gitignore_entries_added:
+            ignored = ", ".join(self.gitignore_entries_added)
+            lines.append(f"  updated  {gitignore_path} (ignoring {ignored})")
         return lines
 
 
@@ -83,16 +92,20 @@ def init_project(cwd: Path) -> InitResult:
 
     settings_file_created, hooks_added = _merge_hooks(settings_path)
 
+    gitignore_entries_added = _ensure_gitignore(cwd)
+
     already_initialized = (
         not replay_dir_created
         and not settings_file_created
         and not hooks_added
+        and not gitignore_entries_added
     )
 
     return InitResult(
         replay_dir_created=replay_dir_created,
         settings_file_created=settings_file_created,
         hooks_added=hooks_added,
+        gitignore_entries_added=gitignore_entries_added,
         already_initialized=already_initialized,
     )
 
@@ -153,6 +166,8 @@ def _merge_hooks(settings_path: Path) -> tuple[bool, list[str]]:
 
 def _hook_already_present(hook_list: list[Any], command: str) -> bool:
     """True if any entry in the hook list runs the given command."""
+    if not isinstance(hook_list, list):
+        return False  # malformed settings (non-list) → treat as not present
     for group in hook_list:
         if not isinstance(group, dict):
             continue
@@ -177,6 +192,50 @@ def _minimal_settings() -> dict[str, Any]:
             _hunch_hook_entry(command, **extra)
         )
     return settings
+
+
+def _gitignore_missing_entries(gitignore_text: str, entries: list[str]) -> list[str]:
+    """Which of `entries` are NOT already covered by the given .gitignore text.
+
+    Compares on stripped, slash-normalized, non-comment lines, so an existing
+    `.hunch` (no slash) counts as covering `.hunch/`. Shared with `hunch.doctor`
+    so the append logic and the health check stay consistent.
+    """
+    present = {
+        line.strip().strip("/")
+        for line in gitignore_text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    return [e for e in entries if e.strip("/") not in present]
+
+
+def _ensure_gitignore(cwd: Path) -> list[str]:
+    """Idempotently ensure the project's `.gitignore` ignores Hunch's local
+    artifacts. Additive: existing content is preserved byte-for-byte; the file
+    is created if absent. Returns the entries newly added.
+
+    Without this, `hunch init` inside a cloned repo leaves `.hunch/` and
+    `.claude/settings.local.json` as untracked changes the user can accidentally
+    commit into someone else's project — isolation must not rely on the user
+    happening to have a global gitignore rule.
+    """
+    gitignore_path = cwd / ".gitignore"
+    existing_text = gitignore_path.read_text() if gitignore_path.exists() else ""
+    to_add = _gitignore_missing_entries(existing_text, _GITIGNORE_ENTRIES)
+    if not to_add:
+        return []
+
+    block = (
+        "# Hunch local artifacts (replay buffer + merged hooks)\n"
+        + "\n".join(to_add)
+        + "\n"
+    )
+    prefix = ""
+    if existing_text:
+        prefix = ("" if existing_text.endswith("\n") else "\n") + "\n"
+    with open(gitignore_path, "a") as f:
+        f.write(prefix + block)
+    return to_add
 
 
 def _write_settings(settings_path: Path, settings: dict[str, Any]) -> None:

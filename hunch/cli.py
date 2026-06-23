@@ -68,10 +68,11 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--critic",
         choices=("stub", "sonnet", "sonnet-dry"),
-        default="stub",
-        help="critic implementation (default: stub — emits nothing). "
-        "sonnet = accumulating v0.1 (shells out to `claude --print`). "
-        "sonnet-dry = v0.1 with no model call (logs prompt sizes only).",
+        default=None,
+        help="critic implementation. Default (no flag): the bundled Sonnet "
+        "accumulator via the `claude` CLI — uses your Claude subscription, no API "
+        "key. stub = emits nothing; sonnet = built-in v0.1 accumulator; "
+        "sonnet-dry = v0.1 with no model call.",
     )
     run.add_argument(
         "--config",
@@ -91,6 +92,45 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="project directory to initialize (default: current working directory)",
+    )
+
+    onb = sub.add_parser(
+        "onboard",
+        help="prepare a project for the agent-guided research setup "
+        "(materializes the onboarding kit; then run `claude` and follow it)",
+    )
+    onb.add_argument(
+        "--cwd",
+        type=Path,
+        default=None,
+        help="project directory to onboard (default: current working directory)",
+    )
+    onb.add_argument(
+        "--no-launch",
+        action="store_true",
+        help="don't auto-launch Claude after preparing; just print the kickoff",
+    )
+
+    st = sub.add_parser(
+        "start",
+        help="open the working tmux layout (research agent + hunch panel + hunch run)",
+    )
+    st.add_argument("--cwd", type=Path, default=None,
+                    help="project directory (default: current working directory)")
+    st.add_argument("--config", type=str, default=None,
+                    help="config file passed through to `hunch run`")
+    st.add_argument("--no-attach", action="store_true",
+                    help="create/prepare the layout but don't attach to tmux")
+
+    doc = sub.add_parser(
+        "doctor",
+        help="preflight health check (claude CLI, hooks, replay dir, gitignore, keys)",
+    )
+    doc.add_argument(
+        "--cwd",
+        type=Path,
+        default=None,
+        help="project directory to check (default: current working directory)",
     )
 
     sub.add_parser("status", help="(planned) print replay-buffer / hunch counts")
@@ -504,7 +544,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         return 1
     _log(f"hunch run: following {runner.transcript_path}")
     _log(f"           replay={config.resolved_replay_dir()}")
-    _log(f"           critic={type(runner.critic).__name__}")
+    _log(f"           critic={type(runner.critic).__name__} — {_critic_label(ns)}")
     _log(f"           trigger=claude-stopped (debounce={trigger_cfg.min_debounce_s}s)")
     _log(f"           filter={'on' if config.filter_enabled else 'off'}")
     _log(f"           poll={config.poll_s}s")
@@ -538,6 +578,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_mine(ns)
     if ns.command == "init":
         return _cmd_init(ns)
+    if ns.command == "onboard":
+        return _cmd_onboard(ns)
+    if ns.command == "start":
+        return _cmd_start(ns)
+    if ns.command == "doctor":
+        return _cmd_doctor(ns)
     if ns.command == "status":
         sys.stderr.write(
             "hunch status: not yet implemented (v0 skeleton).\n"
@@ -565,6 +611,65 @@ def _cmd_init(ns: argparse.Namespace) -> int:
     sys.stdout.write(f"hunch init: {cwd}\n")
     for line in result.as_lines(replay_dir, settings_path):
         sys.stdout.write(line + "\n")
+    return 0
+
+
+def _cmd_onboard(ns: argparse.Namespace) -> int:
+    from hunch.onboarding.onboard import onboard_project
+
+    cwd = (ns.cwd or Path.cwd()).resolve()
+    if not cwd.is_dir():
+        sys.stderr.write(f"hunch onboard: {cwd} is not a directory\n")
+        return 1
+    try:
+        result = onboard_project(cwd)
+    except OSError as e:
+        sys.stderr.write(f"hunch onboard: {e}\n")
+        return 1
+
+    sys.stdout.write(f"hunch onboard: prepared agent-guided setup in {cwd}\n")
+    for line in result.as_lines():
+        sys.stdout.write(line + "\n")
+
+    import os
+    import shutil
+
+    rel = result.procedure_path.relative_to(result.cwd)
+    kickoff = f"Follow {rel} to set up this project for agentic research."
+    if not ns.no_launch and sys.stdout.isatty() and shutil.which("claude"):
+        sys.stdout.write("\nLaunching Claude (pass --no-launch to skip)…\n")
+        os.chdir(cwd)
+        os.execvp("claude", ["claude", kickoff])  # hands off to interactive Claude
+    for line in result.kickoff_lines():
+        sys.stdout.write(line + "\n")
+    return 0
+
+
+def _cmd_start(ns: argparse.Namespace) -> int:
+    from hunch.start import start
+
+    cwd = (ns.cwd or Path.cwd()).resolve()
+    if not cwd.is_dir():
+        sys.stderr.write(f"hunch start: {cwd} is not a directory\n")
+        return 1
+    return start(cwd, config=ns.config, attach=not ns.no_attach)
+
+
+def _cmd_doctor(ns: argparse.Namespace) -> int:
+    from hunch.doctor import run_checks
+
+    cwd = (ns.cwd or Path.cwd()).resolve()
+    if not cwd.is_dir():
+        sys.stderr.write(f"hunch doctor: {cwd} is not a directory\n")
+        return 1
+    report = run_checks(cwd)
+    sys.stdout.write(f"hunch doctor: {cwd}\n")
+    for line in report.as_lines():
+        sys.stdout.write(line + "\n")
+    if not report.ok:
+        sys.stdout.write("\nSome checks failed — resolve the ✗ items above.\n")
+        return 1
+    sys.stdout.write("\nAll hard checks passed. Confirm any ⚠ items yourself.\n")
     return 0
 
 
@@ -1233,18 +1338,43 @@ def _critic_label(ns: argparse.Namespace) -> str:
         from hunch.backend.config import load_config
         full = load_config(ns.config)
         return f"{full.backend.type}:{full.backend.model} (via {ns.config.name})"
+    if getattr(ns, "critic", None) is None:
+        full = _load_default_config()
+        return f"{full.backend.type}:{full.backend.model} (bundled default)"
     return ns.critic
 
 
+def _load_default_config():
+    """Load the bundled default critic config (Sonnet via the `claude` CLI)."""
+    from importlib.resources import as_file, files
+
+    from hunch.backend import load_config
+
+    with as_file(files("hunch.configs") / "sonnet_claude_cli.toml") as p:
+        return load_config(p)
+
+
 def _resolve_critic_factory(
-    name: str, log, config_path: Path | None = None, ns: argparse.Namespace | None = None,
+    name: str | None, log, config_path: Path | None = None,
+    ns: argparse.Namespace | None = None,
 ):
-    """Map a --critic name (or --config path) to a zero-arg factory."""
+    """Map a --critic name (or --config path) to a zero-arg factory.
+
+    With neither --critic nor --config (the `hunch run` default), fall back to the
+    bundled Sonnet-via-claude-CLI config, so a fresh project gets a real critic with
+    no API key and no config file of its own.
+    """
+    full = None
     if config_path is not None:
-        from hunch.backend import load_backend, load_config
+        from hunch.backend import load_config
+        full = load_config(config_path)
+    elif name is None:
+        full = _load_default_config()
+
+    if full is not None:
+        from hunch.backend import load_backend
         from hunch.critic.engine import CriticEngine, CriticEngineConfig
 
-        full = load_config(config_path)
         def _factory():
             backend = load_backend(full.backend, log=log)
             engine_config = CriticEngineConfig(
