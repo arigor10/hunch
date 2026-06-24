@@ -103,3 +103,41 @@ def append_json_line(path: Path, entry: dict[str, Any]) -> None:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         f.write(line)
         f.flush()
+
+
+def read_last_json_line(path: Path) -> dict[str, Any] | None:
+    """Return the last non-empty JSON object in a JSONL file.
+
+    Returns ``None`` if the file is missing, empty, or its last line isn't a
+    JSON object. Reads from the end of the file, so it's cheap even on a large
+    log — used to peek at the most recent event (e.g. ``claude_stopped``)
+    without scanning the whole buffer.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    last_line = None
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        pos = f.tell()
+        if pos == 0:
+            return None
+        buf = b""
+        while pos > 0:
+            chunk = min(4096, pos)
+            pos -= chunk
+            f.seek(pos)
+            buf = f.read(chunk) + buf
+            for line in reversed(buf.split(b"\n")):
+                if line.strip():
+                    last_line = line.strip()
+                    break
+            if last_line is not None:
+                break
+    if last_line is None:
+        return None
+    try:
+        obj = json.loads(last_line)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None

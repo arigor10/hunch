@@ -32,7 +32,11 @@ from typing import Any
 
 UPS_HOOK_COMMAND = "hunch hook user-prompt-submit"
 STOP_HOOK_COMMAND = "hunch hook stop"
-STOP_DELIVERY_HOOK_COMMAND = "hunch hook async-delivery"
+
+# Hook commands we used to install but no longer do. `hunch init` prunes any of
+# these left in an existing settings file — notably the dead async-delivery
+# rewake hook, which assumed an idle-wake that Claude Code never supported.
+_DEAD_HOOK_COMMANDS = {"hunch hook async-delivery"}
 
 # Local, machine-specific artifacts that must never be committed into the
 # project's repo — especially when retrofitting someone else's clone.
@@ -53,6 +57,7 @@ class InitResult:
     replay_dir_created: bool
     settings_file_created: bool
     hooks_added: list[str]
+    hooks_removed: list[str]
     gitignore_entries_added: list[str]
     already_initialized: bool
 
@@ -66,11 +71,16 @@ class InitResult:
             lines.append(f"  existing {replay_dir}")
         if self.settings_file_created:
             lines.append(f"  created  {settings_path}")
-        elif self.hooks_added:
-            added = ", ".join(self.hooks_added)
-            lines.append(f"  updated  {settings_path} (added {added} hook(s))")
         else:
-            lines.append(f"  unchanged {settings_path}")
+            changes = []
+            if self.hooks_added:
+                changes.append(f"added {', '.join(self.hooks_added)}")
+            if self.hooks_removed:
+                changes.append(f"removed {', '.join(self.hooks_removed)}")
+            if changes:
+                lines.append(f"  updated  {settings_path} ({'; '.join(changes)})")
+            else:
+                lines.append(f"  unchanged {settings_path}")
         gitignore_path = settings_path.parent.parent / ".gitignore"
         if self.gitignore_entries_added:
             ignored = ", ".join(self.gitignore_entries_added)
@@ -90,6 +100,7 @@ def init_project(cwd: Path) -> InitResult:
     replay_dir_created = not replay_dir.exists()
     replay_dir.mkdir(parents=True, exist_ok=True)
 
+    hooks_removed = _prune_dead_hooks(settings_path)
     settings_file_created, hooks_added = _merge_hooks(settings_path)
 
     gitignore_entries_added = _ensure_gitignore(cwd)
@@ -98,6 +109,7 @@ def init_project(cwd: Path) -> InitResult:
         not replay_dir_created
         and not settings_file_created
         and not hooks_added
+        and not hooks_removed
         and not gitignore_entries_added
     )
 
@@ -105,6 +117,7 @@ def init_project(cwd: Path) -> InitResult:
         replay_dir_created=replay_dir_created,
         settings_file_created=settings_file_created,
         hooks_added=hooks_added,
+        hooks_removed=hooks_removed,
         gitignore_entries_added=gitignore_entries_added,
         already_initialized=already_initialized,
     )
@@ -117,8 +130,58 @@ def init_project(cwd: Path) -> InitResult:
 _HOOKS_TO_REGISTER: list[tuple[str, str, dict[str, Any]]] = [
     ("UserPromptSubmit", UPS_HOOK_COMMAND, {}),
     ("Stop", STOP_HOOK_COMMAND, {}),
-    ("Stop", STOP_DELIVERY_HOOK_COMMAND, {"asyncRewake": True}),
 ]
+
+
+def _prune_dead_hooks(settings_path: Path) -> list[str]:
+    """Remove hook entries whose command is in ``_DEAD_HOOK_COMMANDS``.
+
+    Existing installs may still carry hooks we no longer ship — notably the
+    async-delivery rewake hook. Additive merging alone would leave them wired
+    forever, so `hunch init` prunes them. A group left empty (it held only dead
+    hooks) is dropped entirely. Returns the commands removed (with multiplicity);
+    idempotent — a second run finds nothing to remove.
+
+    On a missing or unparseable settings file this is a no-op: there's nothing
+    to prune, and `_merge_hooks` raises a clear error for malformed JSON.
+    """
+    if not settings_path.exists():
+        return []
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except json.JSONDecodeError:
+        return []
+
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+
+    removed: list[str] = []
+    for event, hook_list in list(hooks.items()):
+        if not isinstance(hook_list, list):
+            continue
+        new_groups: list[Any] = []
+        for group in hook_list:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                new_groups.append(group)
+                continue
+            kept = []
+            for hook in group["hooks"]:
+                if isinstance(hook, dict) and hook.get("command") in _DEAD_HOOK_COMMANDS:
+                    removed.append(hook["command"])
+                else:
+                    kept.append(hook)
+            if kept:
+                new_group = dict(group)
+                new_group["hooks"] = kept
+                new_groups.append(new_group)
+            # else: the group held only dead hooks → drop it entirely
+        hooks[event] = new_groups
+
+    if removed:
+        _write_settings(settings_path, settings)
+    return removed
 
 
 def _merge_hooks(settings_path: Path) -> tuple[bool, list[str]]:

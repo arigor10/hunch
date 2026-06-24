@@ -22,6 +22,7 @@ from pathlib import Path
 from hunch.init import (
     STOP_HOOK_COMMAND,
     UPS_HOOK_COMMAND,
+    _DEAD_HOOK_COMMANDS,
     _GITIGNORE_ENTRIES,
     _gitignore_missing_entries,
     _hook_already_present,
@@ -68,6 +69,7 @@ def run_checks(cwd: Path) -> DoctorReport:
         _check_claude_auth(),
         _check_api_keys(),
         _check_hooks(cwd),
+        _check_no_stale_hooks(cwd),
         _check_replay_dir(cwd),
         _check_gitignore(cwd),
     ])
@@ -141,6 +143,32 @@ def _check_hooks(cwd: Path) -> Check:
             "hooks wired", FAIL, f"missing: {', '.join(missing)}", fix="run `hunch init`",
         )
     return Check("hooks wired", OK, "UserPromptSubmit + Stop present")
+
+
+def _check_no_stale_hooks(cwd: Path) -> Check:
+    """Warn if a hook we no longer ship is still wired — notably the dead
+    async-delivery rewake hook, which `hunch init` now prunes."""
+    settings = cwd / ".claude" / "settings.local.json"
+    if not settings.exists():
+        return Check("no stale hooks", OK, "no settings file")
+    try:
+        data = json.loads(settings.read_text())
+    except (OSError, ValueError):
+        # _check_hooks already reports unreadable settings as a FAIL.
+        return Check("no stale hooks", OK, "settings unreadable (see hooks check)")
+    hooks = data.get("hooks", {}) if isinstance(data, dict) else {}
+    if not isinstance(hooks, dict):
+        return Check("no stale hooks", OK, "no hooks object (see hooks check)")
+    stale = sorted(
+        cmd for cmd in _DEAD_HOOK_COMMANDS
+        if any(_hook_already_present(hooks.get(name, []), cmd) for name in hooks)
+    )
+    if stale:
+        return Check(
+            "no stale hooks", WARN, f"obsolete hook(s) wired: {', '.join(stale)}",
+            fix="run `hunch init` to prune the dead async-delivery hook",
+        )
+    return Check("no stale hooks", OK, "none")
 
 
 def _check_replay_dir(cwd: Path) -> Check:

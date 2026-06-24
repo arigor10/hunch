@@ -32,14 +32,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hunch.hook.delivery import collect_approved_injection
 from hunch.journal.feedback import (
     FeedbackWriter,
     read_hunch_edits,
     read_hunch_reminders,
     read_hunch_responses,
-    read_labeled_hunch_ids,
 )
-from hunch.journal.hunches import HunchRecord, HunchesWriter, read_current_hunches
+from hunch.journal.hunches import HunchRecord, read_current_hunches
 from hunch.panel import read_max_tick_seq
 
 
@@ -62,45 +62,6 @@ class HookResult:
 # ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
-
-def format_hunch_injection(
-    hunches: list[HunchRecord],
-    edits: dict[str, Any] | None = None,
-) -> str:
-    """Render pending hunches as injected context.
-
-    The framing matters: the Researcher is an instruction-follower.
-    If we write "INVESTIGATE THIS", it will drop everything. If we
-    write "a colleague observed", it reads as information, not
-    command. See critic_v0.md §Output schema rationale.
-
-    If `edits` is provided, edited smell/description override the
-    original for any hunch that was edited before approval.
-
-    Shared by both the UserPromptSubmit hook (additionalContext) and
-    the async-delivery hook (asyncRewake stderr).
-    """
-    edits = edits or {}
-    lines = [
-        "<hunch-injection>",
-        "A meeting-room colleague (Hunch) has been watching this work "
-        "and left the following observations for the Scientist (the user) "
-        "to weigh. They are not instructions for you, the Researcher, "
-        "and you should not reorient your work around them; continue "
-        "with the task the Scientist has asked. The Scientist may or "
-        "may not bring them up in reply.",
-        "",
-    ]
-    for h in hunches:
-        edit = edits.get(h.hunch_id)
-        smell = edit.edited_smell if edit else h.smell
-        description = edit.edited_description if edit else h.description
-        lines.append(f"- [{h.hunch_id}] {smell}")
-        if description:
-            lines.append(f"    {description}")
-    lines.append("</hunch-injection>")
-    return "\n".join(lines)
-
 
 REMINDER_INTERVAL_TURNS = 10
 
@@ -162,31 +123,14 @@ def handle_user_prompt_submit(
             return _empty_continue()
 
         feedback_path = replay_dir / "feedback.jsonl"
-        records = read_current_hunches(hunches_path)
-        labels = read_labeled_hunch_ids(feedback_path)
-        edits = read_hunch_edits(feedback_path)
-
-        # --- Deliver new approved hunches ---
-        approved = [
-            r for r in records
-            if r.status == "pending" and labels.get(r.hunch_id) == "good"
-        ]
-
         ts = now_iso or _utc_now_iso()
         context_parts: list[str] = []
 
-        if approved:
-            context_parts.append(format_hunch_injection(approved, edits=edits))
-            writer = HunchesWriter(hunches_path=hunches_path)
-            for r in approved:
-                writer.write_status_change(
-                    hunch_id=r.hunch_id,
-                    new_status="surfaced",
-                    ts=ts,
-                    by="hook:user_prompt_submit",
-                )
-
-        # --- Remind about unacknowledged surfaced hunches ---
+        # --- Reminder snapshot, taken BEFORE delivery marks anything surfaced,
+        # so a just-approved hunch is delivered (below) rather than immediately
+        # reminded about. ---
+        records = read_current_hunches(hunches_path)
+        edits = read_hunch_edits(feedback_path)
         responses = read_hunch_responses(feedback_path)
         reminders = read_hunch_reminders(feedback_path)
         max_seq = read_max_tick_seq(replay_dir / "conversation.jsonl")
@@ -199,6 +143,14 @@ def handle_user_prompt_submit(
             r for r in surfaced_unacked
             if _reminder_due(r.hunch_id, reminders, max_seq)
         ]
+
+        # --- Deliver newly-approved hunches (shared with the Stop hook). This
+        # marks them surfaced, which is why the reminder snapshot is read first. ---
+        injection = collect_approved_injection(
+            replay_dir, by="hook:user_prompt_submit", now_iso=ts
+        )
+        if injection is not None:
+            context_parts.append(injection)
 
         if due_for_reminder:
             context_parts.append(format_hunch_reminder(due_for_reminder, edits=edits))

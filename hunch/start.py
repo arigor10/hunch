@@ -22,6 +22,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hunch.tmux import parse_roles as _parse_roles, window_roles as _window_roles
+
 SESSION = "hunch"
 RIGHT_COLUMN = "35%"  # sized with `-l`; research (left) keeps ~65%
 # Resume the project's most recent conversation; fall back to a fresh session if
@@ -47,25 +49,6 @@ def _new_session_commands(cwd: str, run_cmd: str) -> list[list[str]]:
         ["tmux", "set-option", "-p", "-t", f"{w}.2", "@hunch_role", "run"],
         ["tmux", "select-pane", "-t", f"{w}.0"],
     ]
-
-
-def _parse_roles(list_panes_output: str) -> dict[str, str]:
-    """Map `@hunch_role` -> pane_id from `tmux list-panes -F "#{pane_id} #{@hunch_role}"`.
-    Untagged panes (empty role) are skipped. Lets a re-run see what's already present."""
-    roles: dict[str, str] = {}
-    for line in list_panes_output.splitlines():
-        parts = line.split()
-        if len(parts) >= 2:
-            roles[parts[1]] = parts[0]
-    return roles
-
-
-def _window_roles() -> dict[str, str]:
-    out = subprocess.run(
-        ["tmux", "list-panes", "-F", "#{pane_id} #{@hunch_role}"],
-        capture_output=True, text=True, check=True,
-    ).stdout
-    return _parse_roles(out)
 
 
 def _tag_pane(pane_id: str, role: str) -> None:

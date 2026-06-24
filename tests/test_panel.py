@@ -60,7 +60,7 @@ def test_display_status_delivered(tmp_path):
     _emit(w, "smell A")
     w.write_status_change(
         hunch_id="h-0001", new_status="surfaced",
-        ts="2026-04-14T12:10:00Z", by="hook:async_delivery",
+        ts="2026-04-14T12:10:00Z", by="hook:stop",
     )
     snap = read_snapshot(tmp_path)
     assert snap.display_status_for("h-0001", snap.records[0]) == "delivered"
@@ -92,7 +92,7 @@ def test_display_status_delivered_overrides_label(tmp_path):
     fb.write_explicit("h-0001", "good", "2026-04-14T12:05:00Z")
     w.write_status_change(
         hunch_id="h-0001", new_status="surfaced",
-        ts="2026-04-14T12:10:00Z", by="hook:async_delivery",
+        ts="2026-04-14T12:10:00Z", by="hook:stop",
     )
     snap = read_snapshot(tmp_path)
     assert snap.display_status_for("h-0001", snap.records[0]) == "delivered"
@@ -153,7 +153,7 @@ def test_visible_shows_only_active_by_default(tmp_path):
     fb.write_explicit("h-0005", "skip", "2026-04-14T12:07:00Z")
     w.write_status_change(
         hunch_id="h-0004", new_status="surfaced",
-        ts="2026-04-14T12:08:00Z", by="hook:async_delivery",
+        ts="2026-04-14T12:08:00Z", by="hook:stop",
     )
 
     snap = read_snapshot(tmp_path)

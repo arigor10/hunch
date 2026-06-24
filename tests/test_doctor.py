@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from hunch.cli import main as cli_main
 from hunch.doctor import (
     FAIL,
@@ -14,6 +16,7 @@ from hunch.doctor import (
     _check_claude_cli,
     _check_gitignore,
     _check_hooks,
+    _check_no_stale_hooks,
     _check_replay_dir,
     run_checks,
 )
@@ -150,6 +153,23 @@ def test_hooks_no_crash_on_non_iterable_hook_value(tmp_path):
     s.parent.mkdir(parents=True)
     s.write_text('{"hooks": {"UserPromptSubmit": 5, "Stop": 5}}')
     assert _check_hooks(tmp_path).status == FAIL
+
+
+def test_no_stale_hooks_warns_when_async_delivery_present(tmp_path):
+    s = tmp_path / ".claude" / "settings.local.json"
+    s.parent.mkdir(parents=True)
+    s.write_text(json.dumps({"hooks": {"Stop": [
+        {"hooks": [{"type": "command", "command": "hunch hook async-delivery",
+                    "asyncRewake": True}]},
+    ]}}))
+    c = _check_no_stale_hooks(tmp_path)
+    assert c.status == WARN
+    assert "async-delivery" in c.detail
+
+
+def test_no_stale_hooks_ok_after_init(tmp_path):
+    init_project(tmp_path)
+    assert _check_no_stale_hooks(tmp_path).status == OK
 
 
 def test_gitignore_warn_when_unreadable(tmp_path):

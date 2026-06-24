@@ -177,7 +177,8 @@ def test_injection_framing_is_information_not_command(tmp_path):
     result = handle_user_prompt_submit(b"{}", replay, now_iso="2026-04-14T12:00:00Z")
     ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
 
-    assert "not instructions for you" in ctx
+    assert "not an instruction" in ctx
+    assert "don't reorient" in ctx
     assert "Scientist" in ctx
 
 

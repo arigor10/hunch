@@ -1,19 +1,28 @@
-"""Stop hook handler.
+"""Stop hook handler — deliver-or-rest.
 
-Claude Code fires the Stop hook when Claude finishes a turn. The hook
-appends a synthetic `claude_stopped` event to conversation.jsonl so the
-framework loop can fire the Critic immediately — hunches are ready
-before the user types their next message.
+Claude Code fires the Stop hook when Claude finishes a turn. The hook makes one
+decision:
 
-The event carries a `tick_seq` one higher than the last line in
-conversation.jsonl. There's a tiny race window (another writer could
-append between our read and write), but in practice only one hook fires
-at a time and the framework loop is the only other writer.
+  - If an approved hunch is waiting, deliver it as ``additionalContext``. Per
+    Claude Code v2.1.152 this keeps the turn going, so Claude reacts to the
+    hunch without the user typing — and we deliberately do NOT append
+    ``claude_stopped``, because Claude is continuing, not resting.
+  - Otherwise, append a synthetic ``claude_stopped`` event to
+    conversation.jsonl. That fires the Critic before the user's next message,
+    and marks the point where Claude has genuinely parked — the signal the
+    tmux relay uses to know it's safe to type.
+
+Delivery (and the ``surfaced`` marking) goes through the shared
+``collect_approved_injection`` helper, so the UPS and Stop paths can't
+double-deliver: whichever fires first marks the hunch, the other skips it. The
+continue-loop is self-bounding — each delivery consumes its hunch (marks it
+surfaced); and if marking ever fails, the hook returns no ``additionalContext``
+so the turn simply ends rather than looping. ``stop_hook_active`` is available
+in the hook's stdin if a further guard is ever needed.
 
 Contract:
-  - Read the last line of conversation.jsonl to get current tick_seq.
-  - Append {"type": "claude_stopped", "tick_seq": N+1, "timestamp": ...}.
-  - Never crash Claude Code. If anything goes wrong, exit silently.
+  - Never crash Claude Code. On any error, log to stderr and return an empty
+    (rest) response.
 """
 
 from __future__ import annotations
@@ -21,70 +30,73 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
-from hunch.journal.append import append_json_line
+from hunch.hook.delivery import collect_approved_injection
+from hunch.journal.append import append_json_line, read_last_json_line
 
 
-def handle_stop(
-    replay_dir: Path,
-    now_iso: str | None = None,
-) -> int:
-    """Append a claude_stopped event to conversation.jsonl.
+@dataclass(frozen=True)
+class StopResult:
+    """What the handler returns. ``stdout`` is the JSON Claude Code reads —
+    a ``hookSpecificOutput.additionalContext`` payload when delivering, or the
+    empty string when Claude is allowed to rest."""
+    stdout: str
 
-    Returns 0 on success, 0 on any error (never crash Claude Code).
-    """
+
+def handle_stop(replay_dir: Path, now_iso: str | None = None) -> StopResult:
+    """Deliver a waiting hunch (keeping the turn going) or record that Claude
+    has come to rest. Never raises."""
     try:
-        conversation_path = replay_dir / "conversation.jsonl"
-        if not conversation_path.exists():
-            return 0
+        injection = collect_approved_injection(
+            replay_dir, by="hook:stop", now_iso=now_iso
+        )
+        if injection is not None:
+            payload = {
+                "hookSpecificOutput": {
+                    "hookEventName": "Stop",
+                    "additionalContext": injection,
+                }
+            }
+            return StopResult(stdout=json.dumps(payload))
 
-        tick_seq = _last_tick_seq(conversation_path)
-        if tick_seq is None:
-            return 0
-
-        ts = now_iso or _utc_now_iso()
-        event = {
-            "tick_seq": tick_seq + 1,
-            "type": "claude_stopped",
-            "timestamp": ts,
-        }
-        append_json_line(conversation_path, event)
-        return 0
+        _append_claude_stopped(replay_dir, now_iso)
+        return StopResult(stdout="")
     except Exception as exc:
-        import sys
         print(f"[hunch stop hook] error: {exc}", file=sys.stderr)
-        return 0
+        return StopResult(stdout="")
+
+
+def _append_claude_stopped(replay_dir: Path, now_iso: str | None) -> None:
+    """Append a ``claude_stopped`` event to conversation.jsonl.
+
+    The event carries a ``tick_seq`` one higher than the last line. There's a
+    tiny race window (another writer could append between our read and write),
+    but in practice only one hook fires at a time and the framework loop is the
+    only other writer.
+    """
+    conversation_path = replay_dir / "conversation.jsonl"
+    if not conversation_path.exists():
+        return
+    tick_seq = _last_tick_seq(conversation_path)
+    if tick_seq is None:
+        return
+    ts = now_iso or _utc_now_iso()
+    append_json_line(
+        conversation_path,
+        {"tick_seq": tick_seq + 1, "type": "claude_stopped", "timestamp": ts},
+    )
 
 
 def _last_tick_seq(path: Path) -> int | None:
-    """Read the last non-empty line of a JSONL file and extract tick_seq."""
-    last_line = None
-    with open(path, "rb") as f:
-        f.seek(0, 2)
-        pos = f.tell()
-        if pos == 0:
-            return None
-        buf = b""
-        while pos > 0:
-            chunk_size = min(4096, pos)
-            pos -= chunk_size
-            f.seek(pos)
-            buf = f.read(chunk_size) + buf
-            lines = buf.split(b"\n")
-            for line in reversed(lines):
-                line = line.strip()
-                if line:
-                    last_line = line
-                    break
-            if last_line is not None:
-                break
-    if last_line is None:
+    """Return the tick_seq of the last event in a JSONL file, or None."""
+    entry = read_last_json_line(path)
+    if entry is None:
         return None
     try:
-        entry = json.loads(last_line)
         return int(entry["tick_seq"])
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError):
         return None
 
 
@@ -106,4 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     ns = parser.parse_args(argv)
 
     replay_dir = ns.replay_dir or (Path.cwd() / ".hunch" / "replay")
-    return handle_stop(replay_dir)
+    result = handle_stop(replay_dir)
+    if result.stdout:
+        sys.stdout.write(result.stdout)
+    return 0

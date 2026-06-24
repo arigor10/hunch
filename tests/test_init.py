@@ -114,6 +114,57 @@ def test_init_second_run_preserves_edited_adjacent_hook(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Pruning dead hooks (migration of existing installs)
+# ---------------------------------------------------------------------------
+
+def test_init_prunes_dead_async_delivery_hook(tmp_path):
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({
+        "hooks": {
+            "Stop": [
+                {"hooks": [{"type": "command", "command": "hunch hook stop"}]},
+                {"hooks": [{"type": "command",
+                            "command": "hunch hook async-delivery",
+                            "asyncRewake": True}]},
+            ]
+        }
+    }))
+
+    result = init_project(tmp_path)
+
+    assert "hunch hook async-delivery" in result.hooks_removed
+    stop_cmds = _all_hook_commands(json.loads(settings_path.read_text()), "Stop")
+    assert "hunch hook async-delivery" not in stop_cmds
+    assert "hunch hook stop" in stop_cmds  # the live hook is preserved
+
+
+def test_init_prune_drops_group_that_held_only_dead_hook(tmp_path):
+    # The async hook lived in its own group; pruning it should drop the group,
+    # not leave an empty {"hooks": []} behind.
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({
+        "hooks": {"Stop": [
+            {"hooks": [{"type": "command", "command": "hunch hook async-delivery",
+                        "asyncRewake": True}]},
+        ]}
+    }))
+
+    init_project(tmp_path)
+
+    stop_groups = json.loads(settings_path.read_text())["hooks"]["Stop"]
+    assert all(g.get("hooks") for g in stop_groups)  # no empty groups
+
+
+def test_init_prune_is_idempotent_on_fresh_install(tmp_path):
+    init_project(tmp_path)            # fresh: nothing dead to prune
+    result2 = init_project(tmp_path)
+    assert result2.hooks_removed == []
+    assert result2.already_initialized is True
+
+
+# ---------------------------------------------------------------------------
 # gitignore isolation
 # ---------------------------------------------------------------------------
 
