@@ -360,6 +360,27 @@ def test_multiple_hunch_responses_in_one_message(transcript_factory, project_roo
     assert ids == {"h-0001", "h-0003"}
 
 
+def test_hunch_response_detected_with_intervening_text_and_dash(
+    transcript_factory, project_root
+):
+    # Natural variations the strict "Re h-XXXX:" regex used to miss: a
+    # parenthetical before the colon, and a dash instead of a colon. These
+    # going unmatched left hunches surfaced-but-unacknowledged → reminder loop.
+    text = (
+        "Re h-0009 (from earlier): reconciled — the 1722 count was correct.\n"
+        "Re h-0011 — closed; bias control confirms it."
+    )
+    path = transcript_factory([transcript_factory.assistant_text(text, "t1")])
+    events, _ = parse_whole_file(path, project_roots=[project_root])
+    responses = {
+        e["hunch_id"]: e["response_text"]
+        for e in events if e["type"] == "hunch_response"
+    }
+    assert set(responses) == {"h-0009", "h-0011"}
+    assert "1722" in responses["h-0009"]
+    assert "bias control" in responses["h-0011"]
+
+
 def test_no_false_positive_hunch_response(transcript_factory, project_root):
     """Regular assistant text without 'Re h-XXXX:' produces no hunch_response."""
     path = transcript_factory([

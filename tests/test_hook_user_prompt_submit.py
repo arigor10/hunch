@@ -177,7 +177,8 @@ def test_injection_framing_is_information_not_command(tmp_path):
     result = handle_user_prompt_submit(b"{}", replay, now_iso="2026-04-14T12:00:00Z")
     ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
 
-    assert "not instructions for you" in ctx
+    assert "not an instruction" in ctx
+    assert "don't reorient" in ctx
     assert "Scientist" in ctx
 
 
@@ -235,6 +236,31 @@ class TestHunchReminder:
 
         result = handle_user_prompt_submit(b"{}", replay, now_iso="2026-04-14T12:10:00Z")
         assert result.stdout == ""
+
+    def test_reminder_stops_after_cap(self, tmp_path):
+        """A surfaced-but-unacknowledged hunch is nudged at most MAX_REMINDERS
+        times, then goes quiet — a missed acknowledgment can't nag forever."""
+        from hunch.hook.user_prompt_submit import MAX_REMINDERS, REMINDER_INTERVAL_TURNS
+
+        replay = tmp_path / "replay"
+        replay.mkdir()
+        writer = HunchesWriter(hunches_path=replay / "hunches.jsonl")
+        hid = _emit(writer, "never acknowledged")
+        _label_good(replay, hid)
+        _surface_hunch(replay, hid)
+
+        reminders_seen = 0
+        tick = 0
+        # Drive well past the cap; count how many UPS calls actually nudge.
+        for _ in range(MAX_REMINDERS + 3):
+            tick += REMINDER_INTERVAL_TURNS + 1
+            _write_conversation_events(replay, tick)
+            result = handle_user_prompt_submit(
+                b"{}", replay, now_iso="2026-04-14T12:10:00Z"
+            )
+            if result.stdout and "<hunch-reminder>" in result.stdout:
+                reminders_seen += 1
+        assert reminders_seen == MAX_REMINDERS
 
     def test_reminder_writes_reminder_event(self, tmp_path):
         """Reminder writes a channel='reminder' event to feedback.jsonl."""

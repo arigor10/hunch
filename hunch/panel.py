@@ -505,7 +505,30 @@ def run(replay_dir: Path, poll_s: float = 1.0, web_port: int = 5556) -> int:
                 self.notify(f"write failed: {e}", severity="error")
                 return
             self.notify(f"{key} → {label}")
+            if label == "good":
+                self._relay_if_parked()
             self._refresh_snapshot()
+
+        def _relay_if_parked(self) -> None:
+            """If Claude is parked in a tmux research pane, type the approved
+            hunch(es) in now (instant idle delivery). Otherwise a no-op — the
+            Stop/UPS hooks carry it. Lazy import so the panel stays light, and
+            never raises into the TUI."""
+            try:
+                from hunch.relay import FAILED, RELAYED, relay_pending
+
+                outcome = relay_pending(self.replay_dir)
+                if outcome == RELAYED:
+                    self.notify("delivered to Claude")
+                elif outcome == FAILED:
+                    self.notify(
+                        "relay failed — will deliver on your next message",
+                        severity="warning",
+                    )
+                # not_in_tmux / no_research_pane / not_parked / nothing: silent —
+                # a hook will deliver it.
+            except Exception as e:
+                self.notify(f"relay error: {e}", severity="warning")
 
     app = HunchPanel(replay_dir=replay_dir, poll_s=poll_s, web_port=web_port)
     try:

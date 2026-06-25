@@ -166,19 +166,31 @@ hunch label h-0003 good                 # mark a hunch
 
 ## How hunches reach the Researcher
 
-When you approve a hunch (press `g` in the side panel), an async background hook delivers it to the Researcher within ~5 seconds. You'll see the injection appear in the Researcher's terminal as a system message:
+When you approve a hunch (press `g` in the side panel), it's delivered to the Researcher — you never copy-paste it. Two paths handle this, and you don't have to think about which one fires:
+
+- **Stop hook (always on).** When the Researcher finishes a turn with an approved hunch waiting, the hunch is injected as context and the turn keeps going, so the Researcher reacts to it without you typing anything. A `UserPromptSubmit` hook does the same on your next message — so an approved hunch is never lost, even with no tmux.
+- **tmux relay (when you use `hunch start`).** If the Researcher is sitting idle and you approve a hunch, the panel types it straight into the Researcher's pane right then — instant, no waiting for the next turn. It only does this when the pane is genuinely idle; if the Researcher is busy (including still working through a previous hunch), the relay stands aside and lets the Stop hook deliver at turn-end.
+
+The Researcher sees the hunch framed as a peripheral observation, not a command:
 
 ```
 <hunch-injection>
-## Hunch h-0042
-**Smell:** The calibration results in exp_042.md show a 3x discrepancy...
-**Description:** Details with citations...
+A meeting-room colleague (Hunch) has been watching this work and flagged the
+observation(s) below for you to consider. ... weigh whether it holds ... but
+don't reorient around it ...
+
+- [h-0042] The calibration results in exp_042.md show a 3x discrepancy...
+    Details with citations...
 </hunch-injection>
 ```
 
-No action needed on your part — the Researcher receives it and responds automatically. If you've labeled a hunch as "bad" or "skip", it won't be injected.
+Hunches you label "bad" or "skip" are never injected.
 
-A fallback `UserPromptSubmit` hook also checks for approved hunches when you send a message, catching anything the async watcher missed.
+> **Upgrading from an older Hunch?** Earlier versions installed an `async-delivery`
+> hook that tried to wake an idle Researcher from the background — Claude Code has no
+> way to do that, so it never delivered reliably. It's gone. **Re-run `hunch init`** in
+> each project to prune the dead hook (it reports `removed hunch hook async-delivery`);
+> `hunch doctor` warns if a stale one is still wired.
 
 ## tmux layout (recommended)
 
