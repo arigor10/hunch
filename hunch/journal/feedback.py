@@ -248,6 +248,35 @@ def read_hunch_reminders(feedback_path: str | Path) -> dict[str, int]:
     return reminders
 
 
+def read_hunch_reminder_counts(feedback_path: str | Path) -> dict[str, int]:
+    """Return ``{hunch_id: number_of_reminder_events}`` from feedback.jsonl.
+
+    Only ``channel == "reminder"`` events contribute. Used to cap how many times
+    a surfaced-but-unacknowledged hunch is nudged, so a missed acknowledgment
+    (e.g. a ``Re h-XXXX`` line the parser couldn't match) can't nag the
+    Researcher forever. Returns ``{}`` if the file doesn't exist.
+    """
+    feedback_path = Path(feedback_path)
+    if not feedback_path.exists():
+        return {}
+    counts: dict[str, int] = {}
+    with open(feedback_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if d.get("channel") != "reminder":
+                continue
+            hid = d.get("hunch_id")
+            if hid:
+                counts[hid] = counts.get(hid, 0) + 1
+    return counts
+
+
 def read_labeled_hunch_ids(feedback_path: str | Path) -> dict[str, str]:
     """Return `{hunch_id: latest_explicit_label}` from feedback.jsonl.
 

@@ -134,7 +134,10 @@ def _is_project_md(path: str, project_roots: Iterable[str]) -> bool:
 _FIGURE_CMD_PREFIX = re.compile(r"(PYTHONPATH=\S+\s+)?(python3?|set\s)")
 _FIGURE_CMD_KEYWORDS = re.compile(r"plot|savefig|pareto|\.png", re.IGNORECASE)
 
-_HUNCH_RESPONSE_RE = re.compile(r"Re (h-\d{4}):\s*(.+)")
+# Match a Researcher acknowledgment line. Lenient about what sits between the
+# hunch id and the separator so natural phrasings are caught, e.g.
+# "Re h-0009 (from earlier): ...", "Re h-0009 — ...", "**Re h-0009:** ...".
+_HUNCH_RESPONSE_RE = re.compile(r"Re (h-\d{4})\b[^\n]*?[:\-—]\s*(.+)")
 _HUNCH_INJECTION_RE = re.compile(r"<hunch-injection>")
 
 

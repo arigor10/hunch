@@ -36,6 +36,7 @@ from hunch.hook.delivery import collect_approved_injection
 from hunch.journal.feedback import (
     FeedbackWriter,
     read_hunch_edits,
+    read_hunch_reminder_counts,
     read_hunch_reminders,
     read_hunch_responses,
 )
@@ -64,6 +65,9 @@ class HookResult:
 # ---------------------------------------------------------------------------
 
 REMINDER_INTERVAL_TURNS = 10
+MAX_REMINDERS = 2  # after this many nudges, stop — a missed acknowledgment
+                   # (e.g. a "Re h-XXXX" line the parser couldn't match) must
+                   # not nag the Researcher forever.
 
 
 def format_hunch_reminder(
@@ -133,6 +137,7 @@ def handle_user_prompt_submit(
         edits = read_hunch_edits(feedback_path)
         responses = read_hunch_responses(feedback_path)
         reminders = read_hunch_reminders(feedback_path)
+        reminder_counts = read_hunch_reminder_counts(feedback_path)
         max_seq = read_max_tick_seq(replay_dir / "conversation.jsonl")
 
         surfaced_unacked = [
@@ -141,7 +146,7 @@ def handle_user_prompt_submit(
         ]
         due_for_reminder = [
             r for r in surfaced_unacked
-            if _reminder_due(r.hunch_id, reminders, max_seq)
+            if _reminder_due(r.hunch_id, reminders, reminder_counts, max_seq)
         ]
 
         # --- Deliver newly-approved hunches (shared with the Stop hook). This
@@ -174,12 +179,21 @@ def handle_user_prompt_submit(
         return _empty_continue()
 
 
-def _reminder_due(hunch_id: str, reminders: dict[str, int], current_seq: int) -> bool:
-    """Check if a surfaced hunch is due for a reminder.
+def _reminder_due(
+    hunch_id: str,
+    reminders: dict[str, int],
+    reminder_counts: dict[str, int],
+    current_seq: int,
+) -> bool:
+    """Check if a surfaced-but-unacknowledged hunch is due for a reminder.
 
-    Due if never reminded, or if REMINDER_INTERVAL_TURNS have passed
-    since the last reminder.
+    Due if under the reminder cap AND (never reminded, or
+    REMINDER_INTERVAL_TURNS have passed since the last reminder). The cap bounds
+    the damage of an unrecorded acknowledgment: we nudge a few times, then leave
+    the hunch surfaced-but-quiet rather than looping forever.
     """
+    if reminder_counts.get(hunch_id, 0) >= MAX_REMINDERS:
+        return False
     last_seq = reminders.get(hunch_id)
     if last_seq is None:
         return True
